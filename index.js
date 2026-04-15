@@ -118,7 +118,7 @@ async function loginSpotify() {
 }
 
 // ====================== BOT READY ======================
-client.once('ready', async () => {
+client.once('clientReady', async () => {
   console.log(`✅ Owo Music Bot Online! (${client.user.tag})`);
   client.user.setActivity('🎵 !play <lagu>', { type: 2 });
   await loginSpotify();
