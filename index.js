@@ -1,5 +1,6 @@
 // ====================== SETUP FFMPEG & SODIUM ======================
 process.env.FFMPEG_PATH = require('ffmpeg-static');
+process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0'; // jika ada masalah SSL
 
 const { Client, GatewayIntentBits, EmbedBuilder } = require('discord.js');
 const {
