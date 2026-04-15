@@ -231,7 +231,7 @@ async function resolveSongs(query, requester, retry = 0) {
 
   return enqueueYtRequest(async () => {
     try {
-      await jitter(800, 1800);
+      await jitter(2000, 4000);
       try {
         if (playdl.is_expired?.() && process.env.SPOTIFY_CLIENT_ID) await loginSpotify();
       } catch (_) {}
@@ -280,22 +280,52 @@ async function resolveSongs(query, requester, retry = 0) {
 
       // ===== YOUTUBE URL =====
       if (query.includes('youtube.com') || query.includes('youtu.be')) {
-        await jitter(800, 1500);
+        await jitter(1500, 3000);
+
+        // Prioritas 1: yt-dlp untuk info (paling stabil & tahan rate limit)
+        try {
+          console.log('[resolve] Mencoba yt-dlp untuk info...');
+          const ytInfo = await youtubedl.exec(query, {
+            dumpSingleJson: true,
+            noWarnings: true,
+            quiet: true,
+            cookies: process.env.YOUTUBE_COOKIE_FILE || undefined,
+            'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+          });
+
+          const songs = [{
+            title: ytInfo.title,
+            url: ytInfo.webpage_url || query,
+            duration: formatDuration(ytInfo.duration),
+            requestedBy: requester,
+            thumbnail: ytInfo.thumbnail
+          }];
+
+          setCache(cacheKey, songs);
+          console.log(`[resolve] ✅ Berhasil pakai yt-dlp: ${ytInfo.title}`);
+          return songs;
+        } catch (ytErr) {
+          console.warn('[resolve] yt-dlp info gagal, fallback ke playdl:', ytErr.message);
+        }
+
+        // Prioritas 2: Fallback ke playdl dengan backoff panjang
         let info;
-        for (let attempt = 0; attempt <= 3; attempt++) {
+        for (let attempt = 0; attempt <= 4; attempt++) {
           try {
             info = await playdl.video_info(query);
             break;
           } catch (err) {
-            if (err.message.includes('429') && attempt < 3) {
-              const wait = (attempt + 1) * 15000;
-              console.log(`⏳ 429 di video_info → tunggu ${wait / 1000}s (attempt ${attempt + 1}/3)`);
+            if (err.message.includes('429') && attempt < 4) {
+              const wait = (attempt + 1) * 25000;
+              console.log(`⏳ 429 di video_info → tunggu ${wait / 1000}s (attempt ${attempt + 1}/4)`);
               await sleep(wait);
               continue;
             }
+            console.error('[resolve] playdl video_info gagal:', err.message);
             throw err;
           }
         }
+
         const details = info.video_details;
         const songs = [{
           title: details.title,
@@ -334,9 +364,9 @@ async function resolveSongs(query, requester, retry = 0) {
   });
 }
 
-// ====================== GET STREAM (BAGIAN YANG DIPERBAIKI) ======================
+// ====================== GET STREAM ======================
 async function getStream(url, retry = 0) {
-  const maxRetries = 2;
+  const maxRetries = 3;
 
   // ── 1. yt-dlp (prioritas utama) ──
   try {
@@ -349,17 +379,15 @@ async function getStream(url, retry = 0) {
       noWarnings: true,
       noCheckCertificates: true,
       bufferSize: '32K',
-      retries: 3,
+      retries: 5,
+      'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
     };
 
-    // Support cookies file (Netscape) - ini yang paling penting
     if (process.env.YOUTUBE_COOKIE_FILE) {
       ytdlpArgs.cookies = process.env.YOUTUBE_COOKIE_FILE;
       console.log(`[yt-dlp] Menggunakan cookies file: ${process.env.YOUTUBE_COOKIE_FILE}`);
-    } 
-    else if (process.env.YOUTUBE_COOKIE) {
+    } else if (process.env.YOUTUBE_COOKIE) {
       ytdlpArgs['add-header'] = `Cookie:${process.env.YOUTUBE_COOKIE.trim()}`;
-      console.log('[yt-dlp] Menggunakan cookie string dari env');
     }
 
     const subprocess = youtubedl.exec(url, ytdlpArgs, { 
@@ -369,40 +397,38 @@ async function getStream(url, retry = 0) {
     const stream = subprocess.stdout;
     if (!stream) throw new Error('yt-dlp stdout null');
 
-    // Tangkap error yt-dlp
     subprocess.stderr?.on('data', (data) => {
       const msg = data.toString().trim();
       if (msg) console.warn('[yt-dlp stderr]', msg);
     });
 
-    console.log('[Stream] ✅ yt-dlp berhasil dengan autentikasi');
+    console.log('[Stream] ✅ yt-dlp berhasil');
     return { stream, type: StreamType.Arbitrary };
   } catch (ytdlpErr) {
     console.warn('[Stream] ❌ yt-dlp gagal:', ytdlpErr.message);
-    if (ytdlpErr.message.includes('input.split') || ytdlpErr.message.includes('split is not a function')) {
-      console.error('⚠️ yt-dlp.exe kemungkinan versi lama atau rusak. Update yt-dlp.exe ke versi terbaru!');
-    }
   }
 
   // ── 2. play-dl ──
   try {
     console.log('[Stream] Mencoba play-dl...');
-    await jitter(500, 1200);
-    const streamData = await playdl.stream(url, { quality: 2 });
-    if (!streamData?.stream) throw new Error('play-dl stream kosong');
-    console.log('[Stream] ✅ play-dl berhasil, type:', streamData.type);
+    await jitter(800, 1500);
+    const streamData = await playdl.stream(url, { 
+      quality: 2,
+      discordPlayerCompatibility: true 
+    });
+    console.log('[Stream] ✅ play-dl berhasil');
     return { stream: streamData.stream, type: streamData.type };
   } catch (playdlErr) {
     console.warn('[Stream] ❌ play-dl gagal:', playdlErr.message);
     if (playdlErr.message.includes('429') && retry < maxRetries) {
-      const wait = (retry + 1) * 12000;
+      const wait = (retry + 1) * 15000;
       console.log(`⏳ 429 di play-dl → tunggu ${wait / 1000}s`);
       await sleep(wait);
       return getStream(url, retry + 1);
     }
   }
 
-  // ── 3. @distube/ytdl-core ──
+  // ── 3. ytdl-core fallback ──
   try {
     console.log('[Stream] Mencoba ytdl-core fallback...');
     const ytdlOptions = {
@@ -416,8 +442,8 @@ async function getStream(url, retry = 0) {
     console.log('[Stream] ✅ ytdl-core berhasil');
     return { stream, type: StreamType.Arbitrary };
   } catch (ytdlErr) {
-    console.error('[Stream] ❌ ytdl-core juga gagal:', ytdlErr.message);
-    throw new Error('Semua metode stream gagal. Coba lagi nanti atau update cookies.');
+    console.error('[Stream] ❌ ytdl-core gagal:', ytdlErr.message);
+    throw new Error('Semua metode stream gagal.');
   }
 }
 
