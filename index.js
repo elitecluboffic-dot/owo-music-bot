@@ -255,6 +255,97 @@ async function playSong(guildId, queue) {
   }
 }
 
+
+// ====================== RESOLVE SONGS (PENTING!) ======================
+async function resolveSongs(query, requester) {
+  try {
+    // Jika input adalah link Spotify
+    if (playdl.is_expired() && process.env.SPOTIFY_CLIENT_ID) {
+      await loginSpotify();
+    }
+
+    if (query.includes('spotify.com')) {
+      const info = await playdl.spotify(query);
+      
+      if (info.type === 'track') {
+        const ytResult = await playdl.search(`${info.name} ${info.artists[0].name}`, {
+          source: "youtube",
+          limit: 1
+        });
+        
+        if (ytResult.length === 0) throw new Error("Tidak ditemukan di YouTube");
+
+        return [{
+          title: info.name,
+          url: ytResult[0].url,
+          duration: formatDuration(info.duration),
+          requestedBy: requester,
+          thumbnail: info.thumbnail
+        }];
+      } 
+      else if (info.type === 'playlist' || info.type === 'album') {
+        const tracks = await playdl.spotify(query, { limit: 50 });
+        const songs = [];
+
+        for (const track of tracks) {
+          const ytSearch = await playdl.search(`${track.name} ${track.artists[0].name}`, {
+            source: "youtube",
+            limit: 1
+          });
+          
+          if (ytSearch.length > 0) {
+            songs.push({
+              title: track.name,
+              url: ytSearch[0].url,
+              duration: formatDuration(track.duration),
+              requestedBy: requester,
+              thumbnail: track.thumbnail
+            });
+          }
+        }
+        return songs;
+      }
+    }
+
+    // YouTube link atau search biasa
+    let results;
+    
+    if (query.includes('youtube.com') || query.includes('youtu.be')) {
+      results = await playdl.video_info(query);
+      return [{
+        title: results.title,
+        url: results.url,
+        duration: formatDuration(results.durationInSec),
+        requestedBy: requester,
+        thumbnail: results.thumbnail
+      }];
+    } else {
+      // Search biasa
+      results = await playdl.search(query, {
+        source: "youtube",
+        limit: 5
+      });
+
+      if (results.length === 0) return [];
+
+      return [{
+        title: results[0].title,
+        url: results[0].url,
+        duration: formatDuration(results[0].durationInSec),
+        requestedBy: requester,
+        thumbnail: results[0].thumbnail
+      }];
+    }
+
+  } catch (error) {
+    console.error('[resolveSongs Error]', error.message);
+    return [];
+  }
+}
+
+
+
+
 // ====================== COMMANDS ======================
 async function cmdPlay(message, query) {
   if (!query) return message.reply('❌ Masukkan judul lagu atau link!\n`!play <judul / link>`');
