@@ -285,13 +285,13 @@ async function resolveSongs(query, requester, retry = 0) {
         // Prioritas 1: yt-dlp untuk info (paling stabil & tahan rate limit)
         try {
           console.log('[resolve] Mencoba yt-dlp untuk info...');
-          const ytInfo = await youtubedl.exec(query, {
-            dumpSingleJson: true,
-            noWarnings: true,
-            quiet: true,
-            cookies: process.env.YOUTUBE_COOKIE_FILE || undefined,
-            'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-          });
+const ytInfo = await youtubedl.exec(query, {
+  dumpSingleJson: true,
+  noWarnings: true,
+  quiet: true,
+  cookiefile: process.env.YOUTUBE_COOKIE_FILE || undefined,
+  'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+});
 
           const songs = [{
             title: ytInfo.title,
