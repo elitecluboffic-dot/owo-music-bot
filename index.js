@@ -1,4 +1,5 @@
 // ====================== SETUP FFMPEG ======================
+const { spawn } = require('child_process');
 process.env.FFMPEG_PATH = require('ffmpeg-static');
 
 const { Client, GatewayIntentBits, EmbedBuilder } = require('discord.js');
@@ -14,41 +15,34 @@ const {
 } = require('@discordjs/voice');
 
 const playdl = require('play-dl');
-const fs = require('fs');
 
-// ====================== YOUTUBE COOKIES (Support Netscape) ======================
+// ====================== YOUTUBE COOKIES ======================
 function loadYouTubeCookies() {
   let cookieInput = process.env.YOUTUBE_COOKIE?.trim();
-
   if (!cookieInput) {
     console.log('⚠️ YOUTUBE_COOKIE belum diisi di Railway Variables!');
     return;
   }
 
-  // Deteksi Netscape format
   if (cookieInput.includes('.youtube.com') || cookieInput.includes('Netscape')) {
-    console.log('🔄 Mendeteksi format Netscape cookies.txt... parsing...');
+    console.log('🔄 Mendeteksi format Netscape cookies.txt...');
     const lines = cookieInput.split('\n');
     const cookieParts = [];
-
     for (const line of lines) {
       const trimmed = line.trim();
       if (trimmed === '' || trimmed.startsWith('#')) continue;
       const parts = trimmed.split(/\s+/);
       if (parts.length < 7) continue;
-
       const name = parts[5];
       const value = parts[6];
-
-      if (['SID', 'HSID', 'SSID', 'APISID', 'SAPISID',
-           '__Secure-1PSID', '__Secure-3PSID',
-           '__Secure-1PAPISID', '__Secure-3PAPISID',
-           '__Secure-1PSIDTS', '__Secure-3PSIDTS',
-           '__Secure-1PSIDCC', '__Secure-3PSIDCC'].includes(name)) {
+      if (['SID','HSID','SSID','APISID','SAPISID',
+           '__Secure-1PSID','__Secure-3PSID',
+           '__Secure-1PAPISID','__Secure-3PAPISID',
+           '__Secure-1PSIDTS','__Secure-3PSIDTS',
+           '__Secure-1PSIDCC','__Secure-3PSIDCC'].includes(name)) {
         cookieParts.push(`${name}=${value}`);
       }
     }
-
     cookieInput = cookieParts.join('; ');
     console.log(`✅ Parse Netscape berhasil → ${cookieParts.length} cookie diambil`);
   }
@@ -60,7 +54,7 @@ function loadYouTubeCookies() {
 
   try {
     playdl.setToken({ youtube: { cookie: cookieInput } });
-    console.log(`✅ YouTube cookies BERHASIL dimuat dari ENV! (${cookieInput.length} karakter)`);
+    console.log(`✅ YouTube cookies berhasil dimuat! (${cookieInput.length} karakter)`);
   } catch (err) {
     console.error('❌ Error set cookie:', err.message);
   }
@@ -78,6 +72,7 @@ const client = new Client({
 });
 
 const queues = new Map();
+const PREFIX = '!';
 
 // ====================== QUEUE FACTORY ======================
 function createQueue() {
@@ -85,7 +80,6 @@ function createQueue() {
     behaviors: { noSubscriber: NoSubscriberBehavior.Pause }
   });
 
-  // 🔥 TAMBAHIN INI
   player.on('stateChange', (oldState, newState) => {
     console.log(`[Player] ${oldState.status} -> ${newState.status}`);
   });
@@ -124,60 +118,97 @@ async function loginSpotify() {
 }
 
 // ====================== BOT READY ======================
-client.once('clientReady', async () => {
+client.once('ready', async () => {
   console.log(`✅ Owo Music Bot Online! (${client.user.tag})`);
   client.user.setActivity('🎵 !play <lagu>', { type: 2 });
   await loginSpotify();
 });
 
-// ====================== HELPER DELAY ======================
+// ====================== HELPER ======================
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
-// ====================== RESOLVE SONGS (ANTI 429) ======================
+function formatDuration(seconds) {
+  if (!seconds || isNaN(seconds)) return '00:00';
+  const m = Math.floor(seconds / 60);
+  const s = Math.floor(seconds % 60);
+  return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+}
+
+// ====================== RESOLVE SONGS ======================
 async function resolveSongs(query, requester, retry = 0) {
   const maxRetries = 4;
   try {
     await sleep(650);
-    if (playdl.is_expired() && process.env.SPOTIFY_CLIENT_ID) await loginSpotify();
+    if (playdl.is_expired?.() && process.env.SPOTIFY_CLIENT_ID) await loginSpotify();
 
+    // ===== SPOTIFY =====
     if (query.includes('spotify.com')) {
       const info = await playdl.spotify(query);
+
       if (info.type === 'track') {
         await sleep(900);
-        const ytResult = await playdl.search(`${info.name} ${info.artists[0].name}`, { source: "youtube", limit: 1 });
-        if (ytResult.length === 0) throw new Error("Tidak ditemukan di YouTube");
-        return [{ title: info.name, url: ytResult[0].url, duration: formatDuration(info.duration), requestedBy: requester, thumbnail: info.thumbnail?.url || ytResult[0].thumbnail }];
+        const ytResult = await playdl.search(`${info.name} ${info.artists[0].name}`, { source: { youtube: 'video' }, limit: 1 });
+        if (!ytResult.length) throw new Error('Tidak ditemukan di YouTube');
+        return [{
+          title: info.name,
+          url: ytResult[0].url,
+          duration: formatDuration(info.durationInSec),
+          requestedBy: requester,
+          thumbnail: info.thumbnail?.url || ytResult[0].thumbnails?.[0]?.url
+        }];
       }
+
       if (info.type === 'playlist' || info.type === 'album') {
-        const tracks = await playdl.spotify(query, { limit: 50 });
         const songs = [];
-        for (const track of tracks) {
+        for (const track of info.tracks || []) {
           await sleep(850);
-          const ytSearch = await playdl.search(`${track.name} ${track.artists[0].name}`, { source: "youtube", limit: 1 });
+          const ytSearch = await playdl.search(`${track.name} ${track.artists[0].name}`, { source: { youtube: 'video' }, limit: 1 });
           if (ytSearch.length > 0) {
-            songs.push({ title: track.name, url: ytSearch[0].url, duration: formatDuration(track.duration), requestedBy: requester, thumbnail: track.thumbnail?.url || ytSearch[0].thumbnail });
+            songs.push({
+              title: track.name,
+              url: ytSearch[0].url,
+              duration: formatDuration(track.durationInSec),
+              requestedBy: requester,
+              thumbnail: track.thumbnail?.url || ytSearch[0].thumbnails?.[0]?.url
+            });
           }
         }
         return songs;
       }
     }
 
+    // ===== YOUTUBE URL =====
     if (query.includes('youtube.com') || query.includes('youtu.be')) {
       await sleep(800);
       const info = await playdl.video_info(query);
-      return [{ title: info.title, url: info.url, duration: formatDuration(info.durationInSec), requestedBy: requester, thumbnail: info.thumbnail }];
+      // FIX: play-dl video_info returns info.video_details
+      const details = info.video_details;
+      return [{
+        title: details.title,
+        url: details.url,
+        duration: formatDuration(details.durationInSec),
+        requestedBy: requester,
+        thumbnail: details.thumbnails?.[0]?.url
+      }];
     }
 
+    // ===== SEARCH =====
     await sleep(750);
-    const results = await playdl.search(query, { source: "youtube", limit: 1 });
-    if (results.length === 0) return [];
-    return [{ title: results[0].title, url: results[0].url, duration: formatDuration(results[0].durationInSec), requestedBy: requester, thumbnail: results[0].thumbnail }];
+    const results = await playdl.search(query, { source: { youtube: 'video' }, limit: 1 });
+    if (!results.length) return [];
+    return [{
+      title: results[0].title,
+      url: results[0].url,
+      duration: formatDuration(results[0].durationInSec),
+      requestedBy: requester,
+      thumbnail: results[0].thumbnails?.[0]?.url
+    }];
 
   } catch (error) {
     console.error('[resolveSongs Error]', error.message);
     if (error.message.includes('429') && retry < maxRetries) {
       const waitTime = (retry + 1) * 10000;
-      console.log(`⏳ Kena 429 → Tunggu ${waitTime/1000} detik (retry ${retry + 1}/${maxRetries})`);
+      console.log(`⏳ Kena 429 → Tunggu ${waitTime / 1000}s (retry ${retry + 1}/${maxRetries})`);
       await sleep(waitTime);
       return resolveSongs(query, requester, retry + 1);
     }
@@ -191,24 +222,39 @@ async function playSong(guildId, queue) {
     if (queue?.textChannel) queue.textChannel.send('✅ Antrian habis! Ketik `!leave` untuk keluar.');
     return;
   }
+
   const song = queue.songs[0];
   try {
     console.log(`[playSong] Streaming: ${song.title}`);
     await sleep(850);
-const ytdl = require('ytdl-core');
 
-const stream = ytdl(song.url, {
-  filter: 'audioonly',
-  quality: 'highestaudio',
-  highWaterMark: 1 << 25
-});
+    const streamData = await playdl.stream(song.url);
+    if (!streamData || !streamData.stream) throw new Error('Stream gagal diambil dari play-dl');
 
-const resource = createAudioResource(stream, {
-  inlineVolume: true
-});
+    const ffmpeg = spawn(process.env.FFMPEG_PATH, [
+      '-i', 'pipe:0',
+      '-vn',
+      '-analyzeduration', '0',
+      '-loglevel', '0',
+      '-f', 's16le',
+      '-ar', '48000',
+      '-ac', '2'
+    ], { stdio: ['pipe', 'pipe', 'ignore'] });
 
-resource.volume?.setVolume(queue.volume);
-queue.player.play(resource);
+    streamData.stream.pipe(ffmpeg.stdin);
+
+    // Handle ffmpeg stdin error (stream closed early)
+    ffmpeg.stdin.on('error', (err) => {
+      console.error('[ffmpeg stdin error]', err.message);
+    });
+
+    const resource = createAudioResource(ffmpeg.stdout, {
+      inputType: 'raw',
+      inlineVolume: true
+    });
+
+    resource.volume?.setVolume(queue.volume);
+    queue.player.play(resource);
 
     if (queue.textChannel) {
       const embed = new EmbedBuilder()
@@ -228,6 +274,7 @@ queue.player.play(resource);
       if (!queue.loop) queue.songs.shift();
       playSong(guildId, queue);
     });
+
   } catch (e) {
     console.error('[playSong Error]', e.message);
     if (queue.textChannel) queue.textChannel.send(`⚠️ Error memutar **${song.title}**, skip...`);
@@ -236,76 +283,60 @@ queue.player.play(resource);
   }
 }
 
-// ====================== START CONNECTION (FINAL FIX) ======================
+// ====================== START CONNECTION ======================
 async function startConnection(queue, voiceChannel, guild) {
   try {
-    // Hapus koneksi lama kalau ada
     const oldConn = getVoiceConnection(guild.id);
     if (oldConn) {
       oldConn.destroy();
       await sleep(800);
     }
 
-    console.log(`[Voice] Mencoba join ke: ${voiceChannel.name}`);
+    console.log(`[Voice] Join ke: ${voiceChannel.name}`);
 
     const connection = joinVoiceChannel({
       channelId: voiceChannel.id,
       guildId: guild.id,
       adapterCreator: guild.voiceAdapterCreator,
-      selfDeaf: false,     // JANGAN DEAF
+      selfDeaf: false,
       selfMute: false
     });
 
-    // ✅ TAMBAHIN INI DI SINI
-connection.on('stateChange', (oldState, newState) => {
-  console.log(`[Voice State] ${oldState.status} -> ${newState.status}`);
-});
+    connection.on('stateChange', (oldState, newState) => {
+      console.log(`[Voice State] ${oldState.status} -> ${newState.status}`);
+    });
 
-connection.on('error', (err) => {
-  console.error('[Voice Connection Error]', err.message);
-});
+    connection.on('error', (err) => {
+      console.error('[Voice Connection Error]', err.message);
+    });
 
-// 🔥 ANTI STUCK FIX
-connection.on(VoiceConnectionStatus.Disconnected, async () => {
-  try {
-    await Promise.race([
-      entersState(connection, VoiceConnectionStatus.Signalling, 5_000),
-      entersState(connection, VoiceConnectionStatus.Connecting, 5_000),
-    ]);
-    console.log('🔄 Reconnecting voice...');
-  } catch {
-    console.log('❌ Destroying connection...');
-    connection.destroy();
-  }
-});
+    connection.on(VoiceConnectionStatus.Disconnected, async () => {
+      try {
+        await Promise.race([
+          entersState(connection, VoiceConnectionStatus.Signalling, 5_000),
+          entersState(connection, VoiceConnectionStatus.Connecting, 5_000),
+        ]);
+        console.log('🔄 Reconnecting voice...');
+      } catch {
+        console.log('❌ Destroying connection...');
+        connection.destroy();
+        queues.delete(guild.id);
+      }
+    });
 
     queue.connection = connection;
+    connection.subscribe(queue.player);
 
-    // Subscribe player
-    const subscription = connection.subscribe(queue.player);
-    if (subscription) {
-      console.log('[Voice] Player berhasil di-subscribe');
-    }
-
-    // Tunggu Ready
-    console.log('[Voice] Menunggu status Ready...');
     await entersState(connection, VoiceConnectionStatus.Ready, 40_000);
-
-    console.log('✅ [Voice] BERHASIL masuk voice channel!');
+    console.log('✅ [Voice] Berhasil join voice channel!');
     return true;
 
   } catch (error) {
     console.error('[Voice ERROR]', error.message);
-
-    // Force clean up
     const conn = getVoiceConnection(guild.id);
     if (conn) conn.destroy();
-
     queues.delete(guild.id);
-
-    if (queue.textChannel) {
-      queue.textChannel.send('❌ Bot gagal join voice channel. Coba lagi.');
-    }
+    if (queue.textChannel) queue.textChannel.send('❌ Bot gagal join voice channel. Coba lagi.');
     return false;
   }
 }
@@ -315,15 +346,9 @@ async function cmdPlay(message, query) {
   if (!query) return message.reply('❌ Masukkan judul lagu atau link!\n`!play <judul / link>`');
 
   const voiceChannel = message.member?.voice.channel;
-  if (!voiceChannel) {
-    return message.reply('❌ Kamu harus join voice channel dulu!');
-  }
+  if (!voiceChannel) return message.reply('❌ Kamu harus join voice channel dulu!');
 
-  // Logging awal yang sangat jelas
-  console.log(`[CMD PLAY] ================== PERINTAH DITERIMA ==================`);
-  console.log(`[CMD PLAY] User: ${message.author.tag}`);
-  console.log(`[CMD PLAY] Channel: #${message.channel.name}`);
-  console.log(`[CMD PLAY] Query: ${query}`);
+  console.log(`[CMD PLAY] User: ${message.author.tag} | Query: ${query}`);
 
   const loadingMsg = await message.reply('🔍 Mencari lagu...');
 
@@ -331,19 +356,13 @@ async function cmdPlay(message, query) {
   if (!queue) {
     queue = createQueue();
     queues.set(message.guild.id, queue);
-    console.log(`[Queue] Queue baru dibuat untuk guild ${message.guild.id}`);
   }
   queue.textChannel = message.channel;
 
   try {
-    console.log(`[Resolve] Mulai resolveSongs...`);
     const songs = await resolveSongs(query, message.author.tag);
-    console.log(`[Resolve] Selesai → Ditemukan ${songs.length} lagu`);
 
-    if (!songs.length) {
-      console.log(`[Resolve] Tidak ada lagu yang ditemukan`);
-      return loadingMsg.edit('❌ Lagu tidak ditemukan atau kena rate limit!');
-    }
+    if (!songs.length) return loadingMsg.edit('❌ Lagu tidak ditemukan atau kena rate limit!');
 
     const wasEmpty = queue.songs.length === 0;
     queue.songs.push(...songs);
@@ -354,38 +373,20 @@ async function cmdPlay(message, query) {
       await loadingMsg.edit(`✅ **Ditambahkan ${songs.length} lagu** ke antrian!`);
     }
 
-    console.log(`[Queue] wasEmpty = ${wasEmpty} | Total lagu sekarang: ${queue.songs.length}`);
-
-    // BAGIAN PALING PENTING: JOIN VOICE
     if (wasEmpty) {
-      console.log(`[Voice] ===== MULAI PROSES JOIN VOICE CHANNEL =====`);
-      console.log(`[Voice] Voice Channel Target: ${voiceChannel.name} (${voiceChannel.id})`);
-
       const connected = await startConnection(queue, voiceChannel, message.guild);
-
-      console.log(`[Voice] Hasil join voice: ${connected ? '✅ BERHASIL' : '❌ GAGAL'}`);
-
       if (connected) {
-        console.log(`[Play] Memulai pemutaran lagu pertama...`);
-        await sleep(500); // delay kecil sebelum play
+        await sleep(500);
         playSong(message.guild.id, queue);
-      } else {
-        console.log(`[Voice] Gagal join, proses dihentikan`);
       }
-    } else {
-      console.log(`[Queue] Lagu ditambahkan ke antrian yang sudah ada`);
-      // Optional reply
-      // message.reply('✅ Lagu berhasil ditambahkan ke antrian!');
     }
 
   } catch (e) {
-    console.error(`[cmdPlay CRITICAL ERROR] ${e.message}`);
-    if (e.stack) console.error(e.stack.substring(0, 400));
+    console.error(`[cmdPlay ERROR]`, e.message);
     await loadingMsg.edit('❌ Terjadi error saat memproses perintah.');
   }
 }
 
-// ====================== COMMAND LAINNYA TETAP SAMA ======================
 async function cmdSkip(message) {
   const queue = queues.get(message.guild.id);
   if (!queue || !queue.songs.length) return message.reply('❌ Tidak ada lagu yang diputar!');
@@ -480,13 +481,56 @@ async function cmdHelp(message) {
   message.reply({ embeds: [embed] });
 }
 
-// ====================== UTILS ======================
-function formatDuration(seconds) {
-  if (!seconds || isNaN(seconds)) return '00:00';
-  const m = Math.floor(seconds / 60);
-  const s = Math.floor(seconds % 60);
-  return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
-}
+// ====================== MESSAGE HANDLER (INI YANG HILANG!) ======================
+client.on('messageCreate', async (message) => {
+  if (message.author.bot) return;
+  if (!message.guild) return;
+  if (!message.content.startsWith(PREFIX)) return;
+
+  const args = message.content.slice(PREFIX.length).trim().split(/ +/);
+  const command = args.shift().toLowerCase();
+  const query = args.join(' ');
+
+  console.log(`[CMD] ${message.author.tag}: ${PREFIX}${command} ${query}`);
+
+  switch (command) {
+    case 'play':
+    case 'p':
+      await cmdPlay(message, query);
+      break;
+    case 'skip':
+    case 's':
+      await cmdSkip(message);
+      break;
+    case 'stop':
+      await cmdStop(message);
+      break;
+    case 'leave':
+    case 'dc':
+      await cmdLeave(message);
+      break;
+    case 'queue':
+    case 'q':
+      await cmdQueue(message);
+      break;
+    case 'np':
+    case 'nowplaying':
+      await cmdNowPlaying(message);
+      break;
+    case 'pause':
+      await cmdPause(message);
+      break;
+    case 'resume':
+      await cmdResume(message);
+      break;
+    case 'loop':
+      await cmdLoop(message);
+      break;
+    case 'help':
+      await cmdHelp(message);
+      break;
+  }
+});
 
 // ====================== LOGIN ======================
 client.login(process.env.TOKEN);
