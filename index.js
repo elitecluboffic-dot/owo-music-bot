@@ -13,6 +13,7 @@ const {
 
 const playdl = require('play-dl');
 const ytdl = require('@distube/ytdl-core');
+const youtubedl = require('youtube-dl-exec');
 
 // ====================== YOUTUBE COOKIES ======================
 function loadYouTubeCookies() {
@@ -48,8 +49,7 @@ function loadYouTubeCookies() {
   }
 
   if (cookieInput.length < 500) {
-    console.log(`⚠️ Cookie terlalu pendek (${cookieInput.length} char)`);
-    return;
+    console.log(`⚠️ Cookie terlalu pendek (${cookieInput.length} char), tetap dicoba...`);
   }
 
   try {
@@ -61,7 +61,7 @@ function loadYouTubeCookies() {
 }
 loadYouTubeCookies();
 
-// ====================== YTDL AGENT (untuk bypass IP ban) ======================
+// ====================== YTDL AGENT ======================
 let ytdlAgent;
 try {
   const rawCookies = process.env.YTDL_COOKIES;
@@ -70,7 +70,7 @@ try {
     console.log('✅ ytdl-core agent berhasil dibuat dari YTDL_COOKIES!');
   } else {
     ytdlAgent = ytdl.createAgent();
-    console.log('ℹ️ ytdl-core agent tanpa cookies (YTDL_COOKIES kosong)');
+    console.log('ℹ️ ytdl-core agent tanpa cookies');
   }
 } catch (e) {
   console.warn('⚠️ Gagal buat ytdl agent:', e.message);
@@ -89,6 +89,16 @@ const client = new Client({
 
 const queues = new Map();
 const PREFIX = '!';
+
+// ====================== HELPERS ======================
+const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+
+function formatDuration(seconds) {
+  if (!seconds || isNaN(seconds)) return '00:00';
+  const m = Math.floor(seconds / 60);
+  const s = Math.floor(seconds % 60);
+  return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+}
 
 // ====================== QUEUE FACTORY ======================
 function createQueue() {
@@ -149,16 +159,6 @@ async function onReady() {
 client.once('ready', onReady);
 client.once('clientReady', onReady);
 
-// ====================== HELPER ======================
-const sleep = (ms) => new Promise(r => setTimeout(r, ms));
-
-function formatDuration(seconds) {
-  if (!seconds || isNaN(seconds)) return '00:00';
-  const m = Math.floor(seconds / 60);
-  const s = Math.floor(seconds % 60);
-  return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
-}
-
 // ====================== RESOLVE SONGS ======================
 async function resolveSongs(query, requester, retry = 0) {
   const maxRetries = 4;
@@ -211,7 +211,21 @@ async function resolveSongs(query, requester, retry = 0) {
     // ===== YOUTUBE URL =====
     if (query.includes('youtube.com') || query.includes('youtu.be')) {
       await sleep(800);
-      const info = await playdl.video_info(query);
+      let info;
+      for (let attempt = 0; attempt <= 3; attempt++) {
+        try {
+          info = await playdl.video_info(query);
+          break;
+        } catch (err) {
+          if (err.message.includes('429') && attempt < 3) {
+            const wait = (attempt + 1) * 12000;
+            console.log(`⏳ 429 di video_info → tunggu ${wait / 1000}s (attempt ${attempt + 1}/3)`);
+            await sleep(wait);
+            continue;
+          }
+          throw err;
+        }
+      }
       const details = info.video_details;
       return [{
         title: details.title,
@@ -237,7 +251,7 @@ async function resolveSongs(query, requester, retry = 0) {
   } catch (error) {
     console.error('[resolveSongs Error]', error.message);
     if (error.message.includes('429') && retry < maxRetries) {
-      const waitTime = (retry + 1) * 10000;
+      const waitTime = (retry + 1) * 12000;
       console.log(`⏳ Kena 429 → Tunggu ${waitTime / 1000}s (retry ${retry + 1}/${maxRetries})`);
       await sleep(waitTime);
       return resolveSongs(query, requester, retry + 1);
@@ -246,20 +260,28 @@ async function resolveSongs(query, requester, retry = 0) {
   }
 }
 
-// ====================== GET STREAM (play-dl + ytdl fallback) ======================
-async function getStream(url) {
-  // Coba play-dl dulu
+// ====================== GET STREAM (play-dl → ytdl-core → yt-dlp) ======================
+async function getStream(url, retry = 0) {
+  const maxRetries = 3;
+
+  // ── 1. play-dl ──
   try {
     console.log('[Stream] Mencoba play-dl...');
     const streamData = await playdl.stream(url, { quality: 2 });
-    if (!streamData || !streamData.stream) throw new Error('play-dl stream kosong');
+    if (!streamData?.stream) throw new Error('play-dl stream kosong');
     console.log('[Stream] ✅ play-dl berhasil, type:', streamData.type);
     return { stream: streamData.stream, type: streamData.type };
   } catch (playdlErr) {
     console.warn('[Stream] ❌ play-dl gagal:', playdlErr.message);
+    if (playdlErr.message.includes('429') && retry < maxRetries) {
+      const wait = (retry + 1) * 10000;
+      console.log(`⏳ 429 di stream → tunggu ${wait / 1000}s (retry ${retry + 1}/${maxRetries})`);
+      await sleep(wait);
+      return getStream(url, retry + 1);
+    }
   }
 
-  // Fallback ke @distube/ytdl-core
+  // ── 2. @distube/ytdl-core ──
   try {
     console.log('[Stream] Mencoba ytdl-core fallback...');
     const ytdlOptions = {
@@ -268,13 +290,34 @@ async function getStream(url) {
       highWaterMark: 1 << 25
     };
     if (ytdlAgent) ytdlOptions.agent = ytdlAgent;
-
     const stream = ytdl(url, ytdlOptions);
     console.log('[Stream] ✅ ytdl-core berhasil');
     return { stream, type: StreamType.Arbitrary };
   } catch (ytdlErr) {
-    console.error('[Stream] ❌ ytdl-core juga gagal:', ytdlErr.message);
-    throw new Error(`Semua stream gagal: ${ytdlErr.message}`);
+    console.warn('[Stream] ❌ ytdl-core gagal:', ytdlErr.message);
+  }
+
+  // ── 3. yt-dlp (ultimate fallback) ──
+  try {
+    console.log('[Stream] Mencoba yt-dlp fallback...');
+    const ytdlpArgs = {
+      format: 'bestaudio[ext=webm]/bestaudio/best',
+      output: '-',
+      quiet: true,
+      noWarnings: true,
+      noCheckCertificates: true,
+    };
+    if (process.env.YTDLP_COOKIE_FILE) {
+      ytdlpArgs.cookies = process.env.YTDLP_COOKIE_FILE;
+    }
+    const subprocess = youtubedl.exec(url, ytdlpArgs, { stdio: ['ignore', 'pipe', 'ignore'] });
+    const stream = subprocess.stdout;
+    if (!stream) throw new Error('yt-dlp stdout null');
+    console.log('[Stream] ✅ yt-dlp berhasil');
+    return { stream, type: StreamType.Arbitrary };
+  } catch (ytdlpErr) {
+    console.error('[Stream] ❌ yt-dlp juga gagal:', ytdlpErr.message);
+    throw new Error('Semua metode stream gagal. Coba lagi nanti.');
   }
 }
 
@@ -406,7 +449,7 @@ async function cmdPlay(message, query) {
   try {
     const songs = await resolveSongs(query, message.author.tag);
 
-    if (!songs.length) return loadingMsg.edit('❌ Lagu tidak ditemukan atau kena rate limit!');
+    if (!songs.length) return loadingMsg.edit('❌ Lagu tidak ditemukan atau kena rate limit. Coba lagi sebentar lagi.');
 
     const wasEmpty = queue.songs.length === 0;
     queue.songs.push(...songs);
