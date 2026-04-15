@@ -21,7 +21,6 @@ function loadYouTubeCookies() {
 
   if (!cookieInput) {
     console.log('⚠️ YOUTUBE_COOKIE belum diisi, init token kosong...');
-    // FIX: init token kosong supaya play-dl tidak crash saat search
     try { playdl.setToken({ youtube: { cookie: '' } }); } catch (_) {}
     return;
   }
@@ -60,7 +59,6 @@ function loadYouTubeCookies() {
     console.log(`✅ YouTube cookies berhasil dimuat! (${cookieInput.length} karakter)`);
   } catch (err) {
     console.error('❌ Error set cookie:', err.message);
-    // FIX: fallback init kosong jika setToken gagal
     try { playdl.setToken({ youtube: { cookie: '' } }); } catch (_) {}
   }
 }
@@ -98,11 +96,69 @@ const PREFIX = '!';
 // ====================== HELPERS ======================
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
+// Delay acak antara min–max ms supaya tidak kena rate limit
+function jitter(min, max) {
+  return sleep(Math.floor(Math.random() * (max - min + 1)) + min);
+}
+
 function formatDuration(seconds) {
   if (!seconds || isNaN(seconds)) return '00:00';
   const m = Math.floor(seconds / 60);
   const s = Math.floor(seconds % 60);
   return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+}
+
+// ====================== SONG CACHE ======================
+// Cache hasil search supaya query yang sama tidak hit YouTube lagi
+const songCache = new Map();
+const CACHE_TTL = 10 * 60 * 1000; // 10 menit
+
+function getCached(key) {
+  const entry = songCache.get(key);
+  if (!entry) return null;
+  if (Date.now() - entry.timestamp > CACHE_TTL) {
+    songCache.delete(key);
+    return null;
+  }
+  return entry.songs;
+}
+
+function setCache(key, songs) {
+  if (songCache.size >= 200) {
+    const firstKey = songCache.keys().next().value;
+    songCache.delete(firstKey);
+  }
+  songCache.set(key, { songs, timestamp: Date.now() });
+}
+
+// ====================== REQUEST QUEUE ======================
+// Semua request ke YouTube dijalankan satu per satu (serialize)
+// supaya tidak ada banyak request paralel yang memicu rate limit
+let ytRequestRunning = false;
+const ytRequestQueue = [];
+
+function enqueueYtRequest(fn) {
+  return new Promise((resolve, reject) => {
+    ytRequestQueue.push({ fn, resolve, reject });
+    processYtQueue();
+  });
+}
+
+async function processYtQueue() {
+  if (ytRequestRunning || ytRequestQueue.length === 0) return;
+  ytRequestRunning = true;
+  const { fn, resolve, reject } = ytRequestQueue.shift();
+  try {
+    const result = await fn();
+    resolve(result);
+  } catch (err) {
+    reject(err);
+  } finally {
+    ytRequestRunning = false;
+    // Delay 1.5–3 detik antar request
+    await jitter(1500, 3000);
+    processYtQueue();
+  }
 }
 
 // ====================== QUEUE FACTORY ======================
@@ -153,7 +209,6 @@ async function loginSpotify() {
 }
 
 // ====================== BOT READY ======================
-// FIX: hanya pakai clientReady, hapus 'ready' yang deprecated
 let readyFired = false;
 async function onReady() {
   if (readyFired) return;
@@ -167,115 +222,160 @@ client.once('clientReady', onReady);
 // ====================== RESOLVE SONGS ======================
 async function resolveSongs(query, requester, retry = 0) {
   const maxRetries = 4;
-  try {
-    await sleep(650);
 
-    // FIX: wrap is_expired check agar tidak crash jika token belum terinit
+  // Cek cache dulu sebelum request ke YouTube
+  const cacheKey = query.toLowerCase().trim();
+  const cached = getCached(cacheKey);
+  if (cached) {
+    console.log(`[Cache] Hit: "${cacheKey}"`);
+    return cached.map(s => ({ ...s, requestedBy: requester }));
+  }
+
+  // Semua request YouTube dimasukkan ke antrian agar tidak paralel
+  return enqueueYtRequest(async () => {
     try {
-      if (playdl.is_expired?.() && process.env.SPOTIFY_CLIENT_ID) await loginSpotify();
-    } catch (_) {}
+      await jitter(800, 1800);
 
-    // ===== SPOTIFY =====
-    if (query.includes('spotify.com')) {
-      const info = await playdl.spotify(query);
+      try {
+        if (playdl.is_expired?.() && process.env.SPOTIFY_CLIENT_ID) await loginSpotify();
+      } catch (_) {}
 
-      if (info.type === 'track') {
-        await sleep(900);
-        const ytResult = await playdl.search(
-          `${info.name} ${info.artists[0].name}`,
-          { source: { youtube: 'video' }, limit: 1 }
-        );
-        if (!ytResult.length) throw new Error('Tidak ditemukan di YouTube');
-        return [{
-          title: info.name,
-          url: ytResult[0].url,
-          duration: formatDuration(info.durationInSec),
-          requestedBy: requester,
-          thumbnail: info.thumbnail?.url || ytResult[0].thumbnails?.[0]?.url
-        }];
-      }
+      // ===== SPOTIFY =====
+      if (query.includes('spotify.com')) {
+        const info = await playdl.spotify(query);
 
-      if (info.type === 'playlist' || info.type === 'album') {
-        const songs = [];
-        for (const track of info.tracks || []) {
-          await sleep(850);
-          const ytSearch = await playdl.search(
-            `${track.name} ${track.artists[0].name}`,
+        if (info.type === 'track') {
+          await jitter(1000, 2000);
+          const ytResult = await playdl.search(
+            `${info.name} ${info.artists[0].name}`,
             { source: { youtube: 'video' }, limit: 1 }
           );
-          if (ytSearch.length > 0) {
-            songs.push({
-              title: track.name,
-              url: ytSearch[0].url,
-              duration: formatDuration(track.durationInSec),
-              requestedBy: requester,
-              thumbnail: track.thumbnail?.url || ytSearch[0].thumbnails?.[0]?.url
-            });
+          if (!ytResult.length) throw new Error('Tidak ditemukan di YouTube');
+          const songs = [{
+            title: info.name,
+            url: ytResult[0].url,
+            duration: formatDuration(info.durationInSec),
+            requestedBy: requester,
+            thumbnail: info.thumbnail?.url || ytResult[0].thumbnails?.[0]?.url
+          }];
+          setCache(cacheKey, songs);
+          return songs;
+        }
+
+        if (info.type === 'playlist' || info.type === 'album') {
+          const songs = [];
+          for (const track of info.tracks || []) {
+            await jitter(1200, 2500);
+            const ytSearch = await playdl.search(
+              `${track.name} ${track.artists[0].name}`,
+              { source: { youtube: 'video' }, limit: 1 }
+            );
+            if (ytSearch.length > 0) {
+              songs.push({
+                title: track.name,
+                url: ytSearch[0].url,
+                duration: formatDuration(track.durationInSec),
+                requestedBy: requester,
+                thumbnail: track.thumbnail?.url || ytSearch[0].thumbnails?.[0]?.url
+              });
+            }
+          }
+          return songs; // playlist tidak di-cache
+        }
+      }
+
+      // ===== YOUTUBE URL =====
+      if (query.includes('youtube.com') || query.includes('youtu.be')) {
+        await jitter(800, 1500);
+        let info;
+        for (let attempt = 0; attempt <= 3; attempt++) {
+          try {
+            info = await playdl.video_info(query);
+            break;
+          } catch (err) {
+            if (err.message.includes('429') && attempt < 3) {
+              const wait = (attempt + 1) * 15000;
+              console.log(`⏳ 429 di video_info → tunggu ${wait / 1000}s (attempt ${attempt + 1}/3)`);
+              await sleep(wait);
+              continue;
+            }
+            throw err;
           }
         }
+        const details = info.video_details;
+        const songs = [{
+          title: details.title,
+          url: details.url,
+          duration: formatDuration(details.durationInSec),
+          requestedBy: requester,
+          thumbnail: details.thumbnails?.[0]?.url
+        }];
+        setCache(cacheKey, songs);
         return songs;
       }
-    }
 
-    // ===== YOUTUBE URL =====
-    if (query.includes('youtube.com') || query.includes('youtu.be')) {
-      await sleep(800);
-      let info;
-      for (let attempt = 0; attempt <= 3; attempt++) {
-        try {
-          info = await playdl.video_info(query);
-          break;
-        } catch (err) {
-          if (err.message.includes('429') && attempt < 3) {
-            const wait = (attempt + 1) * 12000;
-            console.log(`⏳ 429 di video_info → tunggu ${wait / 1000}s (attempt ${attempt + 1}/3)`);
-            await sleep(wait);
-            continue;
-          }
-          throw err;
-        }
-      }
-      const details = info.video_details;
-      return [{
-        title: details.title,
-        url: details.url,
-        duration: formatDuration(details.durationInSec),
+      // ===== SEARCH QUERY =====
+      await jitter(800, 1500);
+      const results = await playdl.search(query, { source: { youtube: 'video' }, limit: 1 });
+      if (!results.length) return [];
+      const songs = [{
+        title: results[0].title,
+        url: results[0].url,
+        duration: formatDuration(results[0].durationInSec),
         requestedBy: requester,
-        thumbnail: details.thumbnails?.[0]?.url
+        thumbnail: results[0].thumbnails?.[0]?.url
       }];
-    }
+      setCache(cacheKey, songs);
+      return songs;
 
-    // ===== SEARCH =====
-    await sleep(750);
-    const results = await playdl.search(query, { source: { youtube: 'video' }, limit: 1 });
-    if (!results.length) return [];
-    return [{
-      title: results[0].title,
-      url: results[0].url,
-      duration: formatDuration(results[0].durationInSec),
-      requestedBy: requester,
-      thumbnail: results[0].thumbnails?.[0]?.url
-    }];
-
-  } catch (error) {
-    console.error('[resolveSongs Error]', error.message);
-    if (error.message?.includes('429') && retry < maxRetries) {
-      const waitTime = (retry + 1) * 12000;
-      console.log(`⏳ Kena 429 → Tunggu ${waitTime / 1000}s (retry ${retry + 1}/${maxRetries})`);
-      await sleep(waitTime);
-      return resolveSongs(query, requester, retry + 1);
+    } catch (error) {
+      console.error('[resolveSongs Error]', error.message);
+      if (error.message?.includes('429') && retry < maxRetries) {
+        // Exponential backoff: 16s → 32s → 64s → 128s
+        const waitTime = Math.pow(2, retry + 1) * 8000;
+        console.log(`⏳ Kena 429 → Tunggu ${waitTime / 1000}s (retry ${retry + 1}/${maxRetries})`);
+        await sleep(waitTime);
+        return resolveSongs(query, requester, retry + 1);
+      }
+      return [];
     }
-    return [];
-  }
+  });
 }
 
-// ====================== GET STREAM (play-dl → ytdl-core → yt-dlp) ======================
+// ====================== GET STREAM ======================
+// Urutan: yt-dlp (prioritas, paling stabil) → play-dl → ytdl-core
 async function getStream(url, retry = 0) {
-  const maxRetries = 3;
+  const maxRetries = 2;
 
-  // ── 1. play-dl ──
+  // ── 1. yt-dlp (prioritas utama, paling tahan rate limit) ──
+  try {
+    console.log('[Stream] Mencoba yt-dlp...');
+    const ytdlpArgs = {
+      format: 'bestaudio[ext=webm]/bestaudio[ext=opus]/bestaudio/best',
+      output: '-',
+      quiet: true,
+      noWarnings: true,
+      noCheckCertificates: true,
+      bufferSize: '16K',
+    };
+    if (process.env.YTDLP_COOKIE_FILE) {
+      ytdlpArgs.cookies = process.env.YTDLP_COOKIE_FILE;
+    } else if (process.env.YOUTUBE_COOKIE) {
+      ytdlpArgs['add-header'] = `Cookie:${process.env.YOUTUBE_COOKIE.trim()}`;
+    }
+    const subprocess = youtubedl.exec(url, ytdlpArgs, { stdio: ['ignore', 'pipe', 'ignore'] });
+    const stream = subprocess.stdout;
+    if (!stream) throw new Error('yt-dlp stdout null');
+    console.log('[Stream] ✅ yt-dlp berhasil');
+    return { stream, type: StreamType.Arbitrary };
+  } catch (ytdlpErr) {
+    console.warn('[Stream] ❌ yt-dlp gagal:', ytdlpErr.message);
+  }
+
+  // ── 2. play-dl ──
   try {
     console.log('[Stream] Mencoba play-dl...');
+    await jitter(500, 1200);
     const streamData = await playdl.stream(url, { quality: 2 });
     if (!streamData?.stream) throw new Error('play-dl stream kosong');
     console.log('[Stream] ✅ play-dl berhasil, type:', streamData.type);
@@ -283,14 +383,14 @@ async function getStream(url, retry = 0) {
   } catch (playdlErr) {
     console.warn('[Stream] ❌ play-dl gagal:', playdlErr.message);
     if (playdlErr.message.includes('429') && retry < maxRetries) {
-      const wait = (retry + 1) * 10000;
+      const wait = (retry + 1) * 12000;
       console.log(`⏳ 429 di stream → tunggu ${wait / 1000}s (retry ${retry + 1}/${maxRetries})`);
       await sleep(wait);
       return getStream(url, retry + 1);
     }
   }
 
-  // ── 2. @distube/ytdl-core ──
+  // ── 3. @distube/ytdl-core ──
   try {
     console.log('[Stream] Mencoba ytdl-core fallback...');
     const ytdlOptions = {
@@ -303,29 +403,7 @@ async function getStream(url, retry = 0) {
     console.log('[Stream] ✅ ytdl-core berhasil');
     return { stream, type: StreamType.Arbitrary };
   } catch (ytdlErr) {
-    console.warn('[Stream] ❌ ytdl-core gagal:', ytdlErr.message);
-  }
-
-  // ── 3. yt-dlp (ultimate fallback) ──
-  try {
-    console.log('[Stream] Mencoba yt-dlp fallback...');
-    const ytdlpArgs = {
-      format: 'bestaudio[ext=webm]/bestaudio/best',
-      output: '-',
-      quiet: true,
-      noWarnings: true,
-      noCheckCertificates: true,
-    };
-    if (process.env.YTDLP_COOKIE_FILE) {
-      ytdlpArgs.cookies = process.env.YTDLP_COOKIE_FILE;
-    }
-    const subprocess = youtubedl.exec(url, ytdlpArgs, { stdio: ['ignore', 'pipe', 'ignore'] });
-    const stream = subprocess.stdout;
-    if (!stream) throw new Error('yt-dlp stdout null');
-    console.log('[Stream] ✅ yt-dlp berhasil');
-    return { stream, type: StreamType.Arbitrary };
-  } catch (ytdlpErr) {
-    console.error('[Stream] ❌ yt-dlp juga gagal:', ytdlpErr.message);
+    console.error('[Stream] ❌ ytdl-core juga gagal:', ytdlErr.message);
     throw new Error('Semua metode stream gagal. Coba lagi nanti.');
   }
 }
@@ -340,7 +418,7 @@ async function playSong(guildId, queue) {
   const song = queue.songs[0];
   try {
     console.log(`[playSong] Streaming: ${song.title}`);
-    await sleep(850);
+    await jitter(500, 1000);
 
     const { stream, type } = await getStream(song.url);
 
