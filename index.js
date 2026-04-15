@@ -372,23 +372,19 @@ async function getStream(url, retry = 0) {
   try {
     console.log('[Stream] Mencoba yt-dlp...');
 
-    const ytdlpArgs = {
-      format: 'bestaudio[ext=webm]/bestaudio[ext=opus]/bestaudio/best',
-      output: '-',
-      quiet: true,
-      noWarnings: true,
-      noCheckCertificates: true,
-      bufferSize: '32K',
-      retries: 5,
-      'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-    };
+const ytdlpArgs = {
+  format: 'bestaudio[ext=webm]/bestaudio[ext=opus]/bestaudio/best',
+  output: '-',
+  quiet: true,
+  noWarnings: true,
+  noCheckCertificates: true,
+  'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+};
 
-    if (process.env.YOUTUBE_COOKIE_FILE) {
-      ytdlpArgs.cookies = process.env.YOUTUBE_COOKIE_FILE;
-      console.log(`[yt-dlp] Menggunakan cookies file: ${process.env.YOUTUBE_COOKIE_FILE}`);
-    } else if (process.env.YOUTUBE_COOKIE) {
-      ytdlpArgs['add-header'] = `Cookie:${process.env.YOUTUBE_COOKIE.trim()}`;
-    }
+if (process.env.YOUTUBE_COOKIE_FILE) {
+  ytdlpArgs.cookiefile = process.env.YOUTUBE_COOKIE_FILE;
+  console.log(`[yt-dlp] Menggunakan cookies file: ${process.env.YOUTUBE_COOKIE_FILE}`);
+}
 
     const subprocess = youtubedl.exec(url, ytdlpArgs, { 
       stdio: ['ignore', 'pipe', 'pipe'] 
