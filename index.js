@@ -16,21 +16,18 @@ const {
 const playdl = require('play-dl');
 const fs = require('fs');
 
-// ====================== YOUTUBE COOKIES DARI ENV (PALING AMAN UNTUK RAILWAY) ======================
+// ====================== YOUTUBE COOKIES ======================
 function loadYouTubeCookies() {
   const cookie = process.env.YOUTUBE_COOKIE?.trim();
-
   if (!cookie) {
     console.log('⚠️ YOUTUBE_COOKIE belum diisi di Railway Variables!');
     console.log('💡 Silakan tambahkan di Variables Railway');
     return;
   }
-
   if (cookie.length < 400) {
     console.log(`⚠️ Cookie terlalu pendek (${cookie.length} char)`);
     return;
   }
-
   try {
     playdl.setToken({ youtube: { cookie: cookie } });
     console.log(`✅ YouTube cookies BERHASIL dimuat dari ENV! (${cookie.length} karakter)`);
@@ -38,7 +35,6 @@ function loadYouTubeCookies() {
     console.error('❌ Error set cookie:', err.message);
   }
 }
-
 loadYouTubeCookies();
 
 // ====================== CLIENT SETUP ======================
@@ -95,63 +91,98 @@ client.once('clientReady', async () => {
   await loginSpotify();
 });
 
-// ====================== MESSAGE HANDLER ======================
-client.on('messageCreate', async (message) => {
-  if (message.author.bot || !message.content.startsWith('!')) return;
+// ====================== HELPER DELAY ======================
+const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
-  const args = message.content.slice(1).trim().split(/ +/);
-  const command = args.shift().toLowerCase();
-  const query = args.join(' ');
+// ====================== RESOLVE SONGS (ANTI 429 FULL) ======================
+async function resolveSongs(query, requester, retry = 0) {
+  const maxRetries = 4;
 
-  switch (command) {
-    case 'play': case 'p': await cmdPlay(message, query); break;
-    case 'skip': case 's': await cmdSkip(message); break;
-    case 'stop': await cmdStop(message); break;
-    case 'queue': case 'q': await cmdQueue(message); break;
-    case 'nowplaying': case 'np': await cmdNowPlaying(message); break;
-    case 'pause': await cmdPause(message); break;
-    case 'resume': await cmdResume(message); break;
-    case 'loop': await cmdLoop(message); break;
-    case 'leave': case 'dc': await cmdLeave(message); break;
-    case 'help': await cmdHelp(message); break;
-  }
-});
+  try {
+    await sleep(650);
 
-// ====================== START CONNECTION ======================
-async function startConnection(queue, voiceChannel, guild) {
-  const oldConn = getVoiceConnection(guild.id);
-  if (oldConn) oldConn.destroy();
-
-  const connection = joinVoiceChannel({
-    channelId: voiceChannel.id,
-    guildId: guild.id,
-    adapterCreator: guild.voiceAdapterCreator,
-    selfDeaf: false,
-    selfMute: false
-  });
-
-  queue.connection = connection;
-  connection.subscribe(queue.player);
-
-  console.log(`[Voice] Mencoba join ke: ${voiceChannel.name}`);
-
-  for (let attempt = 1; attempt <= 3; attempt++) {
-    try {
-      console.log(`[Voice Attempt ${attempt}/3]`);
-      await entersState(connection, VoiceConnectionStatus.Ready, 35_000);
-      console.log('✅ [Voice] BERHASIL terkoneksi!');
-      return true;
-    } catch (e) {
-      console.log(`[Voice Attempt ${attempt}] Gagal: ${e.message}`);
-      if (attempt < 3) await new Promise(r => setTimeout(r, 2000));
+    if (playdl.is_expired() && process.env.SPOTIFY_CLIENT_ID) {
+      await loginSpotify();
     }
-  }
 
-  console.error('[Voice] GAGAL setelah 3 attempt');
-  connection.destroy();
-  queues.delete(guild.id);
-  if (queue.textChannel) queue.textChannel.send('❌ Gagal join voice channel.');
-  return false;
+    // Spotify
+    if (query.includes('spotify.com')) {
+      const info = await playdl.spotify(query);
+
+      if (info.type === 'track') {
+        await sleep(900);
+        const ytResult = await playdl.search(`${info.name} ${info.artists[0].name}`, { source: "youtube", limit: 1 });
+        if (ytResult.length === 0) throw new Error("Tidak ditemukan di YouTube");
+
+        return [{
+          title: info.name,
+          url: ytResult[0].url,
+          duration: formatDuration(info.duration),
+          requestedBy: requester,
+          thumbnail: info.thumbnail?.url || ytResult[0].thumbnail
+        }];
+      }
+
+      if (info.type === 'playlist' || info.type === 'album') {
+        const tracks = await playdl.spotify(query, { limit: 50 });
+        const songs = [];
+
+        for (const track of tracks) {
+          await sleep(850);
+          const ytSearch = await playdl.search(`${track.name} ${track.artists[0].name}`, { source: "youtube", limit: 1 });
+          if (ytSearch.length > 0) {
+            songs.push({
+              title: track.name,
+              url: ytSearch[0].url,
+              duration: formatDuration(track.duration),
+              requestedBy: requester,
+              thumbnail: track.thumbnail?.url || ytSearch[0].thumbnail
+            });
+          }
+        }
+        return songs;
+      }
+    }
+
+    // YouTube Direct Link
+    if (query.includes('youtube.com') || query.includes('youtu.be')) {
+      await sleep(800);
+      const info = await playdl.video_info(query);
+      return [{
+        title: info.title,
+        url: info.url,
+        duration: formatDuration(info.durationInSec),
+        requestedBy: requester,
+        thumbnail: info.thumbnail
+      }];
+    }
+
+    // Search Biasa
+    await sleep(750);
+    const results = await playdl.search(query, { source: "youtube", limit: 1 });
+    if (results.length === 0) return [];
+
+    return [{
+      title: results[0].title,
+      url: results[0].url,
+      duration: formatDuration(results[0].durationInSec),
+      requestedBy: requester,
+      thumbnail: results[0].thumbnail
+    }];
+
+  } catch (error) {
+    console.error('[resolveSongs Error]', error.message);
+
+    if (error.message.includes('429') && retry < maxRetries) {
+      const waitTime = (retry + 1) * 10000;
+      console.log(`⏳ Kena 429 → Tunggu ${waitTime/1000} detik (retry ${retry + 1}/${maxRetries})`);
+      await sleep(waitTime);
+      return resolveSongs(query, requester, retry + 1);
+    }
+
+    console.error(`[resolveSongs] Gagal setelah retry: ${error.message}`);
+    return [];
+  }
 }
 
 // ====================== PLAY SONG ======================
@@ -165,6 +196,8 @@ async function playSong(guildId, queue) {
 
   try {
     console.log(`[playSong] Streaming: ${song.title}`);
+
+    await sleep(850); // delay sebelum stream
 
     const stream = await playdl.stream(song.url, {
       quality: 2,
@@ -209,78 +242,41 @@ async function playSong(guildId, queue) {
   }
 }
 
-// ====================== RESOLVE SONGS (SUDAH DIFIX) ======================
-async function resolveSongs(query, requester) {
-  try {
-    if (playdl.is_expired() && process.env.SPOTIFY_CLIENT_ID) {
-      await loginSpotify();
+// ====================== START CONNECTION ======================
+async function startConnection(queue, voiceChannel, guild) {
+  const oldConn = getVoiceConnection(guild.id);
+  if (oldConn) oldConn.destroy();
+
+  const connection = joinVoiceChannel({
+    channelId: voiceChannel.id,
+    guildId: guild.id,
+    adapterCreator: guild.voiceAdapterCreator,
+    selfDeaf: false,
+    selfMute: false
+  });
+
+  queue.connection = connection;
+  connection.subscribe(queue.player);
+
+  console.log(`[Voice] Mencoba join ke: ${voiceChannel.name}`);
+
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      console.log(`[Voice Attempt ${attempt}/3]`);
+      await entersState(connection, VoiceConnectionStatus.Ready, 35_000);
+      console.log('✅ [Voice] BERHASIL terkoneksi!');
+      return true;
+    } catch (e) {
+      console.log(`[Voice Attempt ${attempt}] Gagal: ${e.message}`);
+      if (attempt < 3) await sleep(2000);
     }
-
-    // Spotify
-    if (query.includes('spotify.com')) {
-      const info = await playdl.spotify(query);
-
-      if (info.type === 'track') {
-        const ytResult = await playdl.search(`${info.name} ${info.artists[0].name}`, { source: "youtube", limit: 1 });
-        if (ytResult.length === 0) throw new Error("Tidak ditemukan di YouTube");
-
-        return [{
-          title: info.name,
-          url: ytResult[0].url,
-          duration: formatDuration(info.duration),
-          requestedBy: requester,
-          thumbnail: info.thumbnail?.url || ytResult[0].thumbnail
-        }];
-      }
-
-      if (info.type === 'playlist' || info.type === 'album') {
-        const tracks = await playdl.spotify(query, { limit: 50 });
-        const songs = [];
-
-        for (const track of tracks) {
-          const ytSearch = await playdl.search(`${track.name} ${track.artists[0].name}`, { source: "youtube", limit: 1 });
-          if (ytSearch.length > 0) {
-            songs.push({
-              title: track.name,
-              url: ytSearch[0].url,
-              duration: formatDuration(track.duration),
-              requestedBy: requester,
-              thumbnail: track.thumbnail?.url || ytSearch[0].thumbnail
-            });
-          }
-        }
-        return songs;
-      }
-    }
-
-    // YouTube Link
-    if (query.includes('youtube.com') || query.includes('youtu.be')) {
-      const info = await playdl.video_info(query);
-      return [{
-        title: info.title,
-        url: info.url,
-        duration: formatDuration(info.durationInSec),
-        requestedBy: requester,
-        thumbnail: info.thumbnail
-      }];
-    }
-
-    // Search Biasa
-    const results = await playdl.search(query, { source: "youtube", limit: 1 });
-    if (results.length === 0) return [];
-
-    return [{
-      title: results[0].title,
-      url: results[0].url,
-      duration: formatDuration(results[0].durationInSec),
-      requestedBy: requester,
-      thumbnail: results[0].thumbnail
-    }];
-
-  } catch (error) {
-    console.error('[resolveSongs Error]', error.message);
-    return [];
   }
+
+  console.error('[Voice] GAGAL setelah 3 attempt');
+  connection.destroy();
+  queues.delete(guild.id);
+  if (queue.textChannel) queue.textChannel.send('❌ Gagal join voice channel.');
+  return false;
 }
 
 // ====================== COMMANDS ======================
@@ -301,7 +297,10 @@ async function cmdPlay(message, query) {
 
   try {
     const songs = await resolveSongs(query, message.author.tag);
-    if (!songs.length) return loadingMsg.edit('❌ Lagu tidak ditemukan!');
+
+    if (!songs.length) {
+      return loadingMsg.edit('❌ Lagu tidak ditemukan atau kena rate limit YouTube!');
+    }
 
     const wasEmpty = queue.songs.length === 0;
     queue.songs.push(...songs);
@@ -322,7 +321,6 @@ async function cmdPlay(message, query) {
   }
 }
 
-// Skip, Stop, Leave, Queue, NP, Pause, Resume, Loop, Help
 async function cmdSkip(message) {
   const queue = queues.get(message.guild.id);
   if (!queue || !queue.songs.length) return message.reply('❌ Tidak ada lagu yang diputar!');
@@ -352,24 +350,20 @@ async function cmdLeave(message) {
 async function cmdQueue(message) {
   const queue = queues.get(message.guild.id);
   if (!queue || !queue.songs.length) return message.reply('📋 Antrian kosong!');
-
   const list = queue.songs.slice(0, 10)
     .map((s, i) => `${i === 0 ? '▶️' : `${i + 1}.`} ${s.title} \`[${s.duration}]\``)
     .join('\n');
-
   const embed = new EmbedBuilder()
     .setColor(0x5865F2)
     .setTitle('📋 Antrian Lagu')
     .setDescription(list)
     .setFooter({ text: `Total: ${queue.songs.length} lagu${queue.loop ? ' | 🔁 Loop aktif' : ''}` });
-
   message.reply({ embeds: [embed] });
 }
 
 async function cmdNowPlaying(message) {
   const queue = queues.get(message.guild.id);
   if (!queue || !queue.songs.length) return message.reply('❌ Tidak ada lagu yang diputar!');
-
   const song = queue.songs[0];
   const embed = new EmbedBuilder()
     .setColor(0x5865F2)
@@ -379,7 +373,6 @@ async function cmdNowPlaying(message) {
       { name: '⏱️ Durasi', value: song.duration || '?', inline: true },
       { name: '👤 Request', value: song.requestedBy || 'Unknown', inline: true }
     );
-
   message.reply({ embeds: [embed] });
 }
 
@@ -419,7 +412,6 @@ async function cmdHelp(message) {
       { name: '`!leave` / `!dc`', value: 'Keluar voice', inline: true }
     )
     .setFooter({ text: 'Owo Music Bot 🎵' });
-
   message.reply({ embeds: [embed] });
 }
 
