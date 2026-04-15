@@ -263,17 +263,23 @@ async function cmdPlay(message, query) {
   const voiceChannel = message.member?.voice.channel;
   if (!voiceChannel) return message.reply('❌ Kamu harus join voice channel dulu!');
 
+  console.log(`[CMD PLAY] Dipanggil oleh ${message.author.tag} | Query: ${query.substring(0, 100)}...`);
+
   const loadingMsg = await message.reply('🔍 Mencari lagu...');
 
   let queue = queues.get(message.guild.id);
   if (!queue) {
     queue = createQueue();
     queues.set(message.guild.id, queue);
+    console.log(`[Queue] Queue baru dibuat untuk server ini`);
   }
   queue.textChannel = message.channel;
 
   try {
+    console.log(`[Resolve] Mulai mencari lagu...`);
     const songs = await resolveSongs(query, message.author.tag);
+    console.log(`[Resolve] Selesai. Ditemukan ${songs.length} lagu`);
+
     if (!songs.length) {
       return loadingMsg.edit('❌ Lagu tidak ditemukan atau kena rate limit!');
     }
@@ -287,17 +293,32 @@ async function cmdPlay(message, query) {
       await loadingMsg.edit(`✅ **Ditambahkan ${songs.length} lagu** ke antrian!`);
     }
 
+    console.log(`[Queue] wasEmpty = ${wasEmpty} | Total lagu di queue: ${queue.songs.length}`);
+
+    // === BAGIAN KRITIS: JOIN VOICE ===
     if (wasEmpty) {
+      console.log(`[Voice] Mulai proses join voice channel...`);
       const connected = await startConnection(queue, voiceChannel, message.guild);
-      if (connected) playSong(message.guild.id, queue);
+      
+      console.log(`[Voice] Hasil join voice: ${connected ? '✅ BERHASIL' : '❌ GAGAL'}`);
+
+      if (connected) {
+        console.log(`[Play] Memulai pemutaran lagu pertama...`);
+        playSong(message.guild.id, queue);
+      }
+    } else {
+      console.log(`[Queue] Lagu berhasil ditambahkan ke antrian yang sudah ada`);
+      message.reply('✅ Lagu ditambahkan ke antrian!');
     }
+
   } catch (e) {
-    console.error('[cmdPlay Error]', e);
-    await loadingMsg.edit('❌ Terjadi error saat mencari lagu.');
+    console.error('[cmdPlay CRITICAL ERROR]', e.message);
+    console.error(e.stack ? e.stack.substring(0, 300) : '');
+    await loadingMsg.edit('❌ Terjadi error saat memproses perintah.');
   }
 }
 
-// Skip, Stop, Leave, Queue, NP, Pause, Resume, Loop, Help (tetap sama seperti kode kamu)
+// ====================== COMMAND LAINNYA (tetap sama) ======================
 async function cmdSkip(message) {
   const queue = queues.get(message.guild.id);
   if (!queue || !queue.songs.length) return message.reply('❌ Tidak ada lagu yang diputar!');
