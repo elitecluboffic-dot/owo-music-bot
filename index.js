@@ -1,7 +1,3 @@
-// ====================== SETUP FFMPEG ======================
-const { spawn } = require('child_process');
-process.env.FFMPEG_PATH = require('ffmpeg-static');
-
 const { Client, GatewayIntentBits, EmbedBuilder } = require('discord.js');
 const {
   joinVoiceChannel,
@@ -11,7 +7,8 @@ const {
   VoiceConnectionStatus,
   entersState,
   getVoiceConnection,
-  NoSubscriberBehavior
+  NoSubscriberBehavior,
+  StreamType
 } = require('@discordjs/voice');
 
 const playdl = require('play-dl');
@@ -256,8 +253,8 @@ async function getStream(url) {
     console.log('[Stream] Mencoba play-dl...');
     const streamData = await playdl.stream(url, { quality: 2 });
     if (!streamData || !streamData.stream) throw new Error('play-dl stream kosong');
-    console.log('[Stream] ✅ play-dl berhasil');
-    return streamData.stream;
+    console.log('[Stream] ✅ play-dl berhasil, type:', streamData.type);
+    return { stream: streamData.stream, type: streamData.type };
   } catch (playdlErr) {
     console.warn('[Stream] ❌ play-dl gagal:', playdlErr.message);
   }
@@ -274,7 +271,7 @@ async function getStream(url) {
 
     const stream = ytdl(url, ytdlOptions);
     console.log('[Stream] ✅ ytdl-core berhasil');
-    return stream;
+    return { stream, type: StreamType.Arbitrary };
   } catch (ytdlErr) {
     console.error('[Stream] ❌ ytdl-core juga gagal:', ytdlErr.message);
     throw new Error(`Semua stream gagal: ${ytdlErr.message}`);
@@ -293,30 +290,10 @@ async function playSong(guildId, queue) {
     console.log(`[playSong] Streaming: ${song.title}`);
     await sleep(850);
 
-    const streamSource = await getStream(song.url);
+    const { stream, type } = await getStream(song.url);
 
-    const ffmpeg = spawn(process.env.FFMPEG_PATH, [
-      '-i', 'pipe:0',
-      '-vn',
-      '-analyzeduration', '0',
-      '-loglevel', '0',
-      '-f', 's16le',
-      '-ar', '48000',
-      '-ac', '2'
-    ], { stdio: ['pipe', 'pipe', 'ignore'] });
-
-    streamSource.pipe(ffmpeg.stdin);
-
-    ffmpeg.stdin.on('error', (err) => {
-      console.error('[ffmpeg stdin error]', err.message);
-    });
-
-    streamSource.on('error', (err) => {
-      console.error('[streamSource error]', err.message);
-    });
-
-    const resource = createAudioResource(ffmpeg.stdout, {
-      inputType: 'raw',
+    const resource = createAudioResource(stream, {
+      inputType: type,
       inlineVolume: true
     });
 
