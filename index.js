@@ -17,57 +17,26 @@ const {
 const playdl = require('play-dl');
 const fs = require('fs');
 
-// ====================== YOUTUBE COOKIES (VERSI FIXED & KUAT) ======================
+// ====================== YOUTUBE COOKIES DARI ENV (PALING AMAN UNTUK RAILWAY) ======================
 function loadYouTubeCookies() {
-  const cookiePath = './cookies.txt';
-  if (!fs.existsSync(cookiePath)) {
-    console.log('⚠️ cookies.txt tidak ditemukan');
+  const cookie = process.env.YOUTUBE_COOKIE?.trim();
+
+  if (!cookie) {
+    console.log('⚠️ YOUTUBE_COOKIE belum diisi di Railway Variables!');
+    console.log('💡 Silakan tambahkan di Variables Railway');
+    return;
+  }
+
+  if (cookie.length < 400) {
+    console.log(`⚠️ Cookie terlalu pendek (${cookie.length} char)`);
     return;
   }
 
   try {
-    let content = fs.readFileSync(cookiePath, 'utf-8').trim();
-    if (!content) {
-      console.log('⚠️ cookies.txt kosong!');
-      return;
-    }
-
-    let cookieString = '';
-
-    // Kalau cookie dalam 1 baris panjang (paling umum)
-    if (content.includes(';')) {
-      cookieString = content.replace(/\s+/g, ' ').trim();
-    } 
-    // Kalau format satu cookie per baris
-    else {
-      const lines = content.split(/\r?\n/);
-      const pairs = [];
-
-      for (const line of lines) {
-        let trimmed = line.trim();
-        if (!trimmed || trimmed.startsWith('#') || trimmed.startsWith('!')) continue;
-
-        const match = trimmed.match(/^([^=;]+)=(.+)$/);
-        if (match) {
-          const name = match[1].trim();
-          let value = match[2].trim().replace(/;.*$/, '');
-          if (value.length > 5) {
-            pairs.push(`${name}=${value}`);
-          }
-        }
-      }
-      cookieString = pairs.join('; ');
-    }
-
-    if (cookieString.length > 300) {
-      playdl.setToken({ youtube: { cookie: cookieString } });
-      console.log(`✅ YouTube cookies BERHASIL dimuat! (${cookieString.length} karakter)`);
-    } else {
-      console.log(`⚠️ Cookie masih terlalu pendek (${cookieString.length} char)`);
-      console.log('💡 Pastikan cookies.txt berisi cookie yang valid');
-    }
+    playdl.setToken({ youtube: { cookie: cookie } });
+    console.log(`✅ YouTube cookies BERHASIL dimuat dari ENV! (${cookie.length} karakter)`);
   } catch (err) {
-    console.error('❌ Error parse cookies:', err.message);
+    console.error('❌ Error set cookie:', err.message);
   }
 }
 
