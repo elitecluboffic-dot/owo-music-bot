@@ -1,19 +1,22 @@
 {
   "name": "owo-music-bot",
   "version": "1.0.0",
-  "description": "Owo Music Bot - YouTube + Spotify",
+  "description": "Discord Music Bot with YouTube & Spotify support",
   "main": "index.js",
   "scripts": {
-    "start": "node index.js"
+    "start": "node index.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
   },
   "dependencies": {
     "@discordjs/voice": "^0.17.0",
-    "discord.js": "^14.15.0",
+    "discord.js": "^14.15.3",
     "play-dl": "^1.9.7",
     "ffmpeg-static": "^5.2.0",
     "libsodium-wrappers": "^0.7.13"
   },
   "engines": {
-    "node": ">=18"
-  }
+    "node": ">=18.0.0"
+  },
+  "author": "BIMXR KRAXX",
+  "license": "MIT"
 }
