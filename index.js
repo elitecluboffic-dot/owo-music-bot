@@ -216,41 +216,52 @@ async function playSong(guildId, queue) {
   }
 }
 
-// ====================== START CONNECTION (FIXED) ======================
+// ====================== START CONNECTION (FINAL FIX) ======================
 async function startConnection(queue, voiceChannel, guild) {
   try {
+    // Hapus koneksi lama kalau ada
     const oldConn = getVoiceConnection(guild.id);
-    if (oldConn) oldConn.destroy();
+    if (oldConn) {
+      oldConn.destroy();
+      await sleep(800);
+    }
 
-    console.log(`[Voice] Mencoba join ke: ${voiceChannel.name} (${voiceChannel.id})`);
+    console.log(`[Voice] Mencoba join ke: ${voiceChannel.name}`);
 
     const connection = joinVoiceChannel({
       channelId: voiceChannel.id,
       guildId: guild.id,
       adapterCreator: guild.voiceAdapterCreator,
-      selfDeaf: false,
+      selfDeaf: false,     // JANGAN DEAF
       selfMute: false
     });
 
     queue.connection = connection;
-    connection.subscribe(queue.player);
 
+    // Subscribe player
+    const subscription = connection.subscribe(queue.player);
+    if (subscription) {
+      console.log('[Voice] Player berhasil di-subscribe');
+    }
+
+    // Tunggu Ready
     console.log('[Voice] Menunggu status Ready...');
-    await entersState(connection, VoiceConnectionStatus.Ready, 45_000); // timeout lebih panjang
+    await entersState(connection, VoiceConnectionStatus.Ready, 40_000);
 
-    console.log('✅ [Voice] BERHASIL terkoneksi!');
+    console.log('✅ [Voice] BERHASIL masuk voice channel!');
     return true;
 
-  } catch (e) {
-    console.error('[Voice Error] Gagal join voice:', e.message);
+  } catch (error) {
+    console.error('[Voice ERROR]', error.message);
 
+    // Force clean up
     const conn = getVoiceConnection(guild.id);
     if (conn) conn.destroy();
 
     queues.delete(guild.id);
 
     if (queue.textChannel) {
-      queue.textChannel.send('❌ Bot gagal masuk voice channel. Pastikan bot punya izin "Connect" dan "Speak".');
+      queue.textChannel.send('❌ Bot gagal join voice channel. Coba lagi.');
     }
     return false;
   }
