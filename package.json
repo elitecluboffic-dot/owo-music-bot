@@ -15,12 +15,8 @@
     "ffmpeg-static": "^5.2.0",
     "libsodium-wrappers": "^0.7.13",
     "play-dl": "^1.9.7",
-<<<<<<< HEAD
-    "ytdl-core": "^4.11.5"
-=======
     "tweetnacl": "^1.0.3",
     "youtube-dl-exec": "^3.0.0"
->>>>>>> 0bf609a9621d8da35ae2b4641adf34c7f0eac292
   },
   "engines": {
     "node": ">=22.12.0"
