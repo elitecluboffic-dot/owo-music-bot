@@ -13,7 +13,10 @@ const {
 
 const playdl = require('play-dl');
 const ytdl = require('@distube/ytdl-core');
-const youtubedl = require('youtube-dl-exec');
+// ====================== YT-DLP CONFIG ======================
+const youtubedl = require('youtube-dl-exec').create({
+  binPath: './yt-dlp.exe'   // ← ini yang kamu tanyakan
+});
 
 // ====================== YOUTUBE COOKIES ======================
 function loadYouTubeCookies() {
