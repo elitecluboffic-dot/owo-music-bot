@@ -261,9 +261,15 @@ async function cmdPlay(message, query) {
   if (!query) return message.reply('❌ Masukkan judul lagu atau link!\n`!play <judul / link>`');
 
   const voiceChannel = message.member?.voice.channel;
-  if (!voiceChannel) return message.reply('❌ Kamu harus join voice channel dulu!');
+  if (!voiceChannel) {
+    return message.reply('❌ Kamu harus join voice channel dulu!');
+  }
 
-  console.log(`[CMD PLAY] Dipanggil oleh ${message.author.tag} | Query: ${query.substring(0, 100)}...`);
+  // Logging awal yang sangat jelas
+  console.log(`[CMD PLAY] ================== PERINTAH DITERIMA ==================`);
+  console.log(`[CMD PLAY] User: ${message.author.tag}`);
+  console.log(`[CMD PLAY] Channel: #${message.channel.name}`);
+  console.log(`[CMD PLAY] Query: ${query}`);
 
   const loadingMsg = await message.reply('🔍 Mencari lagu...');
 
@@ -271,16 +277,17 @@ async function cmdPlay(message, query) {
   if (!queue) {
     queue = createQueue();
     queues.set(message.guild.id, queue);
-    console.log(`[Queue] Queue baru dibuat untuk server ini`);
+    console.log(`[Queue] Queue baru dibuat untuk guild ${message.guild.id}`);
   }
   queue.textChannel = message.channel;
 
   try {
-    console.log(`[Resolve] Mulai mencari lagu...`);
+    console.log(`[Resolve] Mulai resolveSongs...`);
     const songs = await resolveSongs(query, message.author.tag);
-    console.log(`[Resolve] Selesai. Ditemukan ${songs.length} lagu`);
+    console.log(`[Resolve] Selesai → Ditemukan ${songs.length} lagu`);
 
     if (!songs.length) {
+      console.log(`[Resolve] Tidak ada lagu yang ditemukan`);
       return loadingMsg.edit('❌ Lagu tidak ditemukan atau kena rate limit!');
     }
 
@@ -293,32 +300,38 @@ async function cmdPlay(message, query) {
       await loadingMsg.edit(`✅ **Ditambahkan ${songs.length} lagu** ke antrian!`);
     }
 
-    console.log(`[Queue] wasEmpty = ${wasEmpty} | Total lagu di queue: ${queue.songs.length}`);
+    console.log(`[Queue] wasEmpty = ${wasEmpty} | Total lagu sekarang: ${queue.songs.length}`);
 
-    // === BAGIAN KRITIS: JOIN VOICE ===
+    // BAGIAN PALING PENTING: JOIN VOICE
     if (wasEmpty) {
-      console.log(`[Voice] Mulai proses join voice channel...`);
+      console.log(`[Voice] ===== MULAI PROSES JOIN VOICE CHANNEL =====`);
+      console.log(`[Voice] Voice Channel Target: ${voiceChannel.name} (${voiceChannel.id})`);
+
       const connected = await startConnection(queue, voiceChannel, message.guild);
-      
+
       console.log(`[Voice] Hasil join voice: ${connected ? '✅ BERHASIL' : '❌ GAGAL'}`);
 
       if (connected) {
         console.log(`[Play] Memulai pemutaran lagu pertama...`);
+        await sleep(500); // delay kecil sebelum play
         playSong(message.guild.id, queue);
+      } else {
+        console.log(`[Voice] Gagal join, proses dihentikan`);
       }
     } else {
-      console.log(`[Queue] Lagu berhasil ditambahkan ke antrian yang sudah ada`);
-      message.reply('✅ Lagu ditambahkan ke antrian!');
+      console.log(`[Queue] Lagu ditambahkan ke antrian yang sudah ada`);
+      // Optional reply
+      // message.reply('✅ Lagu berhasil ditambahkan ke antrian!');
     }
 
   } catch (e) {
-    console.error('[cmdPlay CRITICAL ERROR]', e.message);
-    console.error(e.stack ? e.stack.substring(0, 300) : '');
+    console.error(`[cmdPlay CRITICAL ERROR] ${e.message}`);
+    if (e.stack) console.error(e.stack.substring(0, 400));
     await loadingMsg.edit('❌ Terjadi error saat memproses perintah.');
   }
 }
 
-// ====================== COMMAND LAINNYA (tetap sama) ======================
+// ====================== COMMAND LAINNYA TETAP SAMA ======================
 async function cmdSkip(message) {
   const queue = queues.get(message.guild.id);
   if (!queue || !queue.songs.length) return message.reply('❌ Tidak ada lagu yang diputar!');
