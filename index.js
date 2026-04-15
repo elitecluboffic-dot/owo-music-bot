@@ -15,6 +15,7 @@ const {
 } = require('@discordjs/voice');
 
 const playdl = require('play-dl');
+const ytdl = require('@distube/ytdl-core');
 
 // ====================== YOUTUBE COOKIES ======================
 function loadYouTubeCookies() {
@@ -35,11 +36,13 @@ function loadYouTubeCookies() {
       if (parts.length < 7) continue;
       const name = parts[5];
       const value = parts[6];
-      if (['SID','HSID','SSID','APISID','SAPISID',
-           '__Secure-1PSID','__Secure-3PSID',
-           '__Secure-1PAPISID','__Secure-3PAPISID',
-           '__Secure-1PSIDTS','__Secure-3PSIDTS',
-           '__Secure-1PSIDCC','__Secure-3PSIDCC'].includes(name)) {
+      if ([
+        'SID', 'HSID', 'SSID', 'APISID', 'SAPISID',
+        '__Secure-1PSID', '__Secure-3PSID',
+        '__Secure-1PAPISID', '__Secure-3PAPISID',
+        '__Secure-1PSIDTS', '__Secure-3PSIDTS',
+        '__Secure-1PSIDCC', '__Secure-3PSIDCC'
+      ].includes(name)) {
         cookieParts.push(`${name}=${value}`);
       }
     }
@@ -60,6 +63,22 @@ function loadYouTubeCookies() {
   }
 }
 loadYouTubeCookies();
+
+// ====================== YTDL AGENT (untuk bypass IP ban) ======================
+let ytdlAgent;
+try {
+  const rawCookies = process.env.YTDL_COOKIES;
+  if (rawCookies) {
+    ytdlAgent = ytdl.createAgent(JSON.parse(rawCookies));
+    console.log('✅ ytdl-core agent berhasil dibuat dari YTDL_COOKIES!');
+  } else {
+    ytdlAgent = ytdl.createAgent();
+    console.log('ℹ️ ytdl-core agent tanpa cookies (YTDL_COOKIES kosong)');
+  }
+} catch (e) {
+  console.warn('⚠️ Gagal buat ytdl agent:', e.message);
+  ytdlAgent = undefined;
+}
 
 // ====================== CLIENT SETUP ======================
 const client = new Client({
@@ -101,7 +120,11 @@ function createQueue() {
 // ====================== SPOTIFY LOGIN ======================
 async function loginSpotify() {
   try {
-    if (process.env.SPOTIFY_CLIENT_ID && process.env.SPOTIFY_CLIENT_SECRET && process.env.SPOTIFY_REFRESH_TOKEN) {
+    if (
+      process.env.SPOTIFY_CLIENT_ID &&
+      process.env.SPOTIFY_CLIENT_SECRET &&
+      process.env.SPOTIFY_REFRESH_TOKEN
+    ) {
       await playdl.setToken({
         spotify: {
           client_id: process.env.SPOTIFY_CLIENT_ID,
@@ -152,7 +175,10 @@ async function resolveSongs(query, requester, retry = 0) {
 
       if (info.type === 'track') {
         await sleep(900);
-        const ytResult = await playdl.search(`${info.name} ${info.artists[0].name}`, { source: { youtube: 'video' }, limit: 1 });
+        const ytResult = await playdl.search(
+          `${info.name} ${info.artists[0].name}`,
+          { source: { youtube: 'video' }, limit: 1 }
+        );
         if (!ytResult.length) throw new Error('Tidak ditemukan di YouTube');
         return [{
           title: info.name,
@@ -167,7 +193,10 @@ async function resolveSongs(query, requester, retry = 0) {
         const songs = [];
         for (const track of info.tracks || []) {
           await sleep(850);
-          const ytSearch = await playdl.search(`${track.name} ${track.artists[0].name}`, { source: { youtube: 'video' }, limit: 1 });
+          const ytSearch = await playdl.search(
+            `${track.name} ${track.artists[0].name}`,
+            { source: { youtube: 'video' }, limit: 1 }
+          );
           if (ytSearch.length > 0) {
             songs.push({
               title: track.name,
@@ -186,7 +215,6 @@ async function resolveSongs(query, requester, retry = 0) {
     if (query.includes('youtube.com') || query.includes('youtu.be')) {
       await sleep(800);
       const info = await playdl.video_info(query);
-      // FIX: play-dl video_info returns info.video_details
       const details = info.video_details;
       return [{
         title: details.title,
@@ -221,6 +249,38 @@ async function resolveSongs(query, requester, retry = 0) {
   }
 }
 
+// ====================== GET STREAM (play-dl + ytdl fallback) ======================
+async function getStream(url) {
+  // Coba play-dl dulu
+  try {
+    console.log('[Stream] Mencoba play-dl...');
+    const streamData = await playdl.stream(url, { quality: 2 });
+    if (!streamData || !streamData.stream) throw new Error('play-dl stream kosong');
+    console.log('[Stream] ✅ play-dl berhasil');
+    return streamData.stream;
+  } catch (playdlErr) {
+    console.warn('[Stream] ❌ play-dl gagal:', playdlErr.message);
+  }
+
+  // Fallback ke @distube/ytdl-core
+  try {
+    console.log('[Stream] Mencoba ytdl-core fallback...');
+    const ytdlOptions = {
+      filter: 'audioonly',
+      quality: 'highestaudio',
+      highWaterMark: 1 << 25
+    };
+    if (ytdlAgent) ytdlOptions.agent = ytdlAgent;
+
+    const stream = ytdl(url, ytdlOptions);
+    console.log('[Stream] ✅ ytdl-core berhasil');
+    return stream;
+  } catch (ytdlErr) {
+    console.error('[Stream] ❌ ytdl-core juga gagal:', ytdlErr.message);
+    throw new Error(`Semua stream gagal: ${ytdlErr.message}`);
+  }
+}
+
 // ====================== PLAY SONG ======================
 async function playSong(guildId, queue) {
   if (!queue || !queue.songs.length) {
@@ -233,8 +293,7 @@ async function playSong(guildId, queue) {
     console.log(`[playSong] Streaming: ${song.title}`);
     await sleep(850);
 
-    const streamData = await playdl.stream(song.url);
-    if (!streamData || !streamData.stream) throw new Error('Stream gagal diambil dari play-dl');
+    const streamSource = await getStream(song.url);
 
     const ffmpeg = spawn(process.env.FFMPEG_PATH, [
       '-i', 'pipe:0',
@@ -246,11 +305,14 @@ async function playSong(guildId, queue) {
       '-ac', '2'
     ], { stdio: ['pipe', 'pipe', 'ignore'] });
 
-    streamData.stream.pipe(ffmpeg.stdin);
+    streamSource.pipe(ffmpeg.stdin);
 
-    // Handle ffmpeg stdin error (stream closed early)
     ffmpeg.stdin.on('error', (err) => {
       console.error('[ffmpeg stdin error]', err.message);
+    });
+
+    streamSource.on('error', (err) => {
+      console.error('[streamSource error]', err.message);
     });
 
     const resource = createAudioResource(ffmpeg.stdout, {
@@ -486,7 +548,7 @@ async function cmdHelp(message) {
   message.reply({ embeds: [embed] });
 }
 
-// ====================== MESSAGE HANDLER (INI YANG HILANG!) ======================
+// ====================== MESSAGE HANDLER ======================
 client.on('messageCreate', async (message) => {
   if (message.author.bot) return;
   if (!message.guild) return;
