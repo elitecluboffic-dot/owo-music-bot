@@ -17,7 +17,7 @@ const {
 const playdl = require('play-dl');
 const fs = require('fs');
 
-// ====================== YOUTUBE COOKIES ======================
+// ====================== YOUTUBE COOKIES (VERSI FIXED & KUAT) ======================
 function loadYouTubeCookies() {
   const cookiePath = './cookies.txt';
   if (!fs.existsSync(cookiePath)) {
@@ -26,44 +26,45 @@ function loadYouTubeCookies() {
   }
 
   try {
-    let content = fs.readFileSync(cookiePath, 'utf-8');
-    const lines = content.split(/\r?\n/);
-    const cookiePairs = [];
-
-    for (const line of lines) {
-      let trimmed = line.trim();
-      if (!trimmed || trimmed.startsWith('#') || trimmed.startsWith('!')) continue;
-
-      trimmed = trimmed.replace(/[\x00-\x1F\x7F]/g, '');
-
-      const parts = trimmed.split(/\t+/);
-      let name = null, value = null;
-
-      if (parts.length >= 7) {
-        name = parts[5].trim();
-        value = parts[6].trim();
-      } else {
-        const match = trimmed.match(/([^\s]+)\s+(.+)$/);
-        if (match) {
-          name = match[1].trim();
-          value = match[2].trim();
-        }
-      }
-
-      if (name && value && value.length > 10) {
-        value = value.replace(/[\r\n;"]/g, '').trim();
-        cookiePairs.push(`${name}=${value}`);
-      }
+    let content = fs.readFileSync(cookiePath, 'utf-8').trim();
+    if (!content) {
+      console.log('⚠️ cookies.txt kosong!');
+      return;
     }
 
-    const cookieString = cookiePairs.join('; ');
+    let cookieString = '';
 
-    if (cookieString.length > 200) {
+    // Kalau cookie dalam 1 baris panjang (paling umum)
+    if (content.includes(';')) {
+      cookieString = content.replace(/\s+/g, ' ').trim();
+    } 
+    // Kalau format satu cookie per baris
+    else {
+      const lines = content.split(/\r?\n/);
+      const pairs = [];
+
+      for (const line of lines) {
+        let trimmed = line.trim();
+        if (!trimmed || trimmed.startsWith('#') || trimmed.startsWith('!')) continue;
+
+        const match = trimmed.match(/^([^=;]+)=(.+)$/);
+        if (match) {
+          const name = match[1].trim();
+          let value = match[2].trim().replace(/;.*$/, '');
+          if (value.length > 5) {
+            pairs.push(`${name}=${value}`);
+          }
+        }
+      }
+      cookieString = pairs.join('; ');
+    }
+
+    if (cookieString.length > 300) {
       playdl.setToken({ youtube: { cookie: cookieString } });
-      console.log(`✅ YouTube cookies LOADED BERHASIL! (${cookiePairs.length} cookies)`);
-      console.log(`📏 Panjang: ${cookieString.length} karakter`);
+      console.log(`✅ YouTube cookies BERHASIL dimuat! (${cookieString.length} karakter)`);
     } else {
-      console.log(`⚠️ Cookie masih pendek (${cookieString.length} char)`);
+      console.log(`⚠️ Cookie masih terlalu pendek (${cookieString.length} char)`);
+      console.log('💡 Pastikan cookies.txt berisi cookie yang valid');
     }
   } catch (err) {
     console.error('❌ Error parse cookies:', err.message);
