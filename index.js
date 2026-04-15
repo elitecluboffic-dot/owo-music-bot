@@ -195,14 +195,15 @@ async function playSong(guildId, queue) {
   try {
     console.log(`[playSong] Streaming: ${song.title}`);
     await sleep(850);
-const stream = await playdl.stream(song.url, {
-  discordPlayerCompatibility: true
+const ytdl = require('ytdl-core');
+
+const stream = ytdl(song.url, {
+  filter: 'audioonly',
+  quality: 'highestaudio',
+  highWaterMark: 1 << 25
 });
 
- const { StreamType } = require('@discordjs/voice');
-
-const resource = createAudioResource(stream.stream, {
-  inputType: StreamType.Arbitrary,
+const resource = createAudioResource(stream, {
   inlineVolume: true
 });
 
