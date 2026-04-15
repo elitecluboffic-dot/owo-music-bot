@@ -118,11 +118,16 @@ async function loginSpotify() {
 }
 
 // ====================== BOT READY ======================
-client.once('clientReady', async () => {
+let readyFired = false;
+async function onReady() {
+  if (readyFired) return;
+  readyFired = true;
   console.log(`✅ Owo Music Bot Online! (${client.user.tag})`);
   client.user.setActivity('🎵 !play <lagu>', { type: 2 });
   await loginSpotify();
-});
+}
+client.once('ready', onReady);
+client.once('clientReady', onReady);
 
 // ====================== HELPER ======================
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
