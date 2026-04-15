@@ -199,9 +199,15 @@ const stream = await playdl.stream(song.url, {
   discordPlayerCompatibility: true
 });
 
-    const resource = createAudioResource(stream.stream, { inputType: stream.type, inlineVolume: true });
-    resource.volume?.setVolume(queue.volume);
-    queue.player.play(resource);
+ const { StreamType } = require('@discordjs/voice');
+
+const resource = createAudioResource(stream.stream, {
+  inputType: StreamType.Arbitrary,
+  inlineVolume: true
+});
+
+resource.volume?.setVolume(queue.volume);
+queue.player.play(resource);
 
     if (queue.textChannel) {
       const embed = new EmbedBuilder()
