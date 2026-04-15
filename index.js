@@ -1,6 +1,6 @@
 // ====================== SETUP FFMPEG & SODIUM ======================
 process.env.FFMPEG_PATH = require('ffmpeg-static');
-process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0'; // jika ada masalah SSL
+process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
 
 const { Client, GatewayIntentBits, EmbedBuilder } = require('discord.js');
 const {
@@ -37,8 +37,7 @@ function loadYouTubeCookies() {
       trimmed = trimmed.replace(/[\x00-\x1F\x7F]/g, '');
 
       const parts = trimmed.split(/\t+/);
-      let name = null;
-      let value = null;
+      let name = null, value = null;
 
       if (parts.length >= 7) {
         name = parts[5].trim();
@@ -51,7 +50,7 @@ function loadYouTubeCookies() {
         }
       }
 
-      if (name && value && value.length > 15) {
+      if (name && value && value.length > 10) {
         value = value.replace(/[\r\n;"]/g, '').trim();
         cookiePairs.push(`${name}=${value}`);
       }
@@ -59,10 +58,10 @@ function loadYouTubeCookies() {
 
     const cookieString = cookiePairs.join('; ');
 
-    if (cookieString.length > 300) {
+    if (cookieString.length > 200) {
       playdl.setToken({ youtube: { cookie: cookieString } });
       console.log(`✅ YouTube cookies LOADED BERHASIL! (${cookiePairs.length} cookies)`);
-      console.log(`   Panjang: ${cookieString.length} karakter`);
+      console.log(`📏 Panjang: ${cookieString.length} karakter`);
     } else {
       console.log(`⚠️ Cookie masih pendek (${cookieString.length} char)`);
     }
@@ -95,8 +94,7 @@ function createQueue() {
     connection: null,
     textChannel: null,
     volume: 1,
-    loop: false,
-    currentResource: null
+    loop: false
   };
 }
 
@@ -150,9 +148,8 @@ client.on('messageCreate', async (message) => {
   }
 });
 
-// ====================== START CONNECTION (RAILWAY OPTIMIZED) ======================
+// ====================== START CONNECTION ======================
 async function startConnection(queue, voiceChannel, guild) {
-  // Cleanup old connection
   const oldConn = getVoiceConnection(guild.id);
   if (oldConn) oldConn.destroy();
 
@@ -169,15 +166,6 @@ async function startConnection(queue, voiceChannel, guild) {
 
   console.log(`[Voice] Mencoba join ke: ${voiceChannel.name}`);
 
-  connection.on('stateChange', (oldState, newState) => {
-    console.log(`[Voice State] ${oldState.status} → ${newState.status}`);
-  });
-
-  connection.on('error', (err) => {
-    console.error('[Voice Error]', err.message);
-  });
-
-  // Retry logic (penting untuk Railway)
   for (let attempt = 1; attempt <= 3; attempt++) {
     try {
       console.log(`[Voice Attempt ${attempt}/3]`);
@@ -190,14 +178,10 @@ async function startConnection(queue, voiceChannel, guild) {
     }
   }
 
-  // Jika gagal semua
   console.error('[Voice] GAGAL setelah 3 attempt');
   connection.destroy();
   queues.delete(guild.id);
-
-  if (queue.textChannel) {
-    queue.textChannel.send('❌ Gagal join voice channel.\nCoba buat voice channel baru lalu redeploy bot.');
-  }
+  if (queue.textChannel) queue.textChannel.send('❌ Gagal join voice channel.');
   return false;
 }
 
@@ -256,24 +240,19 @@ async function playSong(guildId, queue) {
   }
 }
 
-
-// ====================== RESOLVE SONGS (PENTING!) ======================
+// ====================== RESOLVE SONGS (SUDAH DIFIX) ======================
 async function resolveSongs(query, requester) {
   try {
-    // Jika input adalah link Spotify
     if (playdl.is_expired() && process.env.SPOTIFY_CLIENT_ID) {
       await loginSpotify();
     }
 
+    // Spotify
     if (query.includes('spotify.com')) {
       const info = await playdl.spotify(query);
-      
+
       if (info.type === 'track') {
-        const ytResult = await playdl.search(`${info.name} ${info.artists[0].name}`, {
-          source: "youtube",
-          limit: 1
-        });
-        
+        const ytResult = await playdl.search(`${info.name} ${info.artists[0].name}`, { source: "youtube", limit: 1 });
         if (ytResult.length === 0) throw new Error("Tidak ditemukan di YouTube");
 
         return [{
@@ -281,26 +260,23 @@ async function resolveSongs(query, requester) {
           url: ytResult[0].url,
           duration: formatDuration(info.duration),
           requestedBy: requester,
-          thumbnail: info.thumbnail
+          thumbnail: info.thumbnail?.url || ytResult[0].thumbnail
         }];
-      } 
-      else if (info.type === 'playlist' || info.type === 'album') {
+      }
+
+      if (info.type === 'playlist' || info.type === 'album') {
         const tracks = await playdl.spotify(query, { limit: 50 });
         const songs = [];
 
         for (const track of tracks) {
-          const ytSearch = await playdl.search(`${track.name} ${track.artists[0].name}`, {
-            source: "youtube",
-            limit: 1
-          });
-          
+          const ytSearch = await playdl.search(`${track.name} ${track.artists[0].name}`, { source: "youtube", limit: 1 });
           if (ytSearch.length > 0) {
             songs.push({
               title: track.name,
               url: ytSearch[0].url,
               duration: formatDuration(track.duration),
               requestedBy: requester,
-              thumbnail: track.thumbnail
+              thumbnail: track.thumbnail?.url || ytSearch[0].thumbnail
             });
           }
         }
@@ -308,44 +284,35 @@ async function resolveSongs(query, requester) {
       }
     }
 
-    // YouTube link atau search biasa
-    let results;
-    
+    // YouTube Link
     if (query.includes('youtube.com') || query.includes('youtu.be')) {
-      results = await playdl.video_info(query);
+      const info = await playdl.video_info(query);
       return [{
-        title: results.title,
-        url: results.url,
-        duration: formatDuration(results.durationInSec),
+        title: info.title,
+        url: info.url,
+        duration: formatDuration(info.durationInSec),
         requestedBy: requester,
-        thumbnail: results.thumbnail
-      }];
-    } else {
-      // Search biasa
-      results = await playdl.search(query, {
-        source: "youtube",
-        limit: 5
-      });
-
-      if (results.length === 0) return [];
-
-      return [{
-        title: results[0].title,
-        url: results[0].url,
-        duration: formatDuration(results[0].durationInSec),
-        requestedBy: requester,
-        thumbnail: results[0].thumbnail
+        thumbnail: info.thumbnail
       }];
     }
+
+    // Search Biasa
+    const results = await playdl.search(query, { source: "youtube", limit: 1 });
+    if (results.length === 0) return [];
+
+    return [{
+      title: results[0].title,
+      url: results[0].url,
+      duration: formatDuration(results[0].durationInSec),
+      requestedBy: requester,
+      thumbnail: results[0].thumbnail
+    }];
 
   } catch (error) {
     console.error('[resolveSongs Error]', error.message);
     return [];
   }
 }
-
-
-
 
 // ====================== COMMANDS ======================
 async function cmdPlay(message, query) {
@@ -386,9 +353,7 @@ async function cmdPlay(message, query) {
   }
 }
 
-// cmdSkip, cmdStop, cmdLeave, cmdQueue, cmdNowPlaying, cmdPause, cmdResume, cmdLoop, cmdHelp
-// (saya biarkan sama seperti kode kamu karena sudah cukup baik)
-
+// Skip, Stop, Leave, Queue, NP, Pause, Resume, Loop, Help
 async function cmdSkip(message) {
   const queue = queues.get(message.guild.id);
   if (!queue || !queue.songs.length) return message.reply('❌ Tidak ada lagu yang diputar!');
@@ -406,27 +371,36 @@ async function cmdStop(message) {
 }
 
 async function cmdLeave(message) {
-  cleanupQueue(message.guild.id);
+  const queue = queues.get(message.guild.id);
+  if (queue) {
+    queue.player.stop(true);
+    queue.connection?.destroy();
+    queues.delete(message.guild.id);
+  }
   message.reply('👋 Bot keluar dari voice channel!');
 }
 
 async function cmdQueue(message) {
   const queue = queues.get(message.guild.id);
   if (!queue || !queue.songs.length) return message.reply('📋 Antrian kosong!');
+
   const list = queue.songs.slice(0, 10)
-    .map((s, i) => `${i === 0 ? '▶️' : `${i}.`} ${s.title} \`[${s.duration}]\``)
+    .map((s, i) => `${i === 0 ? '▶️' : `${i + 1}.`} ${s.title} \`[${s.duration}]\``)
     .join('\n');
+
   const embed = new EmbedBuilder()
     .setColor(0x5865F2)
     .setTitle('📋 Antrian Lagu')
     .setDescription(list)
     .setFooter({ text: `Total: ${queue.songs.length} lagu${queue.loop ? ' | 🔁 Loop aktif' : ''}` });
+
   message.reply({ embeds: [embed] });
 }
 
 async function cmdNowPlaying(message) {
   const queue = queues.get(message.guild.id);
   if (!queue || !queue.songs.length) return message.reply('❌ Tidak ada lagu yang diputar!');
+
   const song = queue.songs[0];
   const embed = new EmbedBuilder()
     .setColor(0x5865F2)
@@ -436,6 +410,7 @@ async function cmdNowPlaying(message) {
       { name: '⏱️ Durasi', value: song.duration || '?', inline: true },
       { name: '👤 Request', value: song.requestedBy || 'Unknown', inline: true }
     );
+
   message.reply({ embeds: [embed] });
 }
 
@@ -465,7 +440,7 @@ async function cmdHelp(message) {
     .setColor(0x5865F2)
     .setTitle('🎵 Owo Music Bot — Daftar Perintah')
     .addFields(
-      { name: '`!play <judul/link>`', value: 'Putar lagu dari YouTube atau Spotify', inline: false },
+      { name: '`!play <judul/link>`', value: 'Putar lagu dari YouTube/Spotify', inline: false },
       { name: '`!skip` / `!s`', value: 'Skip lagu', inline: true },
       { name: '`!stop`', value: 'Stop & clear antrian', inline: true },
       { name: '`!pause` / `!resume`', value: 'Pause / Resume', inline: true },
@@ -475,6 +450,7 @@ async function cmdHelp(message) {
       { name: '`!leave` / `!dc`', value: 'Keluar voice', inline: true }
     )
     .setFooter({ text: 'Owo Music Bot 🎵' });
+
   message.reply({ embeds: [embed] });
 }
 
@@ -484,16 +460,6 @@ function formatDuration(seconds) {
   const m = Math.floor(seconds / 60);
   const s = Math.floor(seconds % 60);
   return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
-}
-
-function cleanupQueue(guildId) {
-  const queue = queues.get(guildId);
-  if (queue) {
-    queue.songs = [];
-    queue.player?.stop(true);
-    queue.connection?.destroy();
-  }
-  queues.delete(guildId);
 }
 
 // ====================== LOGIN ======================
