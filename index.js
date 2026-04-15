@@ -18,8 +18,11 @@ const youtubedl = require('youtube-dl-exec');
 // ====================== YOUTUBE COOKIES ======================
 function loadYouTubeCookies() {
   let cookieInput = process.env.YOUTUBE_COOKIE?.trim();
+
   if (!cookieInput) {
-    console.log('⚠️ YOUTUBE_COOKIE belum diisi di Railway Variables!');
+    console.log('⚠️ YOUTUBE_COOKIE belum diisi, init token kosong...');
+    // FIX: init token kosong supaya play-dl tidak crash saat search
+    try { playdl.setToken({ youtube: { cookie: '' } }); } catch (_) {}
     return;
   }
 
@@ -57,6 +60,8 @@ function loadYouTubeCookies() {
     console.log(`✅ YouTube cookies berhasil dimuat! (${cookieInput.length} karakter)`);
   } catch (err) {
     console.error('❌ Error set cookie:', err.message);
+    // FIX: fallback init kosong jika setToken gagal
+    try { playdl.setToken({ youtube: { cookie: '' } }); } catch (_) {}
   }
 }
 loadYouTubeCookies();
@@ -148,6 +153,7 @@ async function loginSpotify() {
 }
 
 // ====================== BOT READY ======================
+// FIX: hanya pakai clientReady, hapus 'ready' yang deprecated
 let readyFired = false;
 async function onReady() {
   if (readyFired) return;
@@ -156,7 +162,6 @@ async function onReady() {
   client.user.setActivity('🎵 !play <lagu>', { type: 2 });
   await loginSpotify();
 }
-client.once('ready', onReady);
 client.once('clientReady', onReady);
 
 // ====================== RESOLVE SONGS ======================
@@ -164,7 +169,11 @@ async function resolveSongs(query, requester, retry = 0) {
   const maxRetries = 4;
   try {
     await sleep(650);
-    if (playdl.is_expired?.() && process.env.SPOTIFY_CLIENT_ID) await loginSpotify();
+
+    // FIX: wrap is_expired check agar tidak crash jika token belum terinit
+    try {
+      if (playdl.is_expired?.() && process.env.SPOTIFY_CLIENT_ID) await loginSpotify();
+    } catch (_) {}
 
     // ===== SPOTIFY =====
     if (query.includes('spotify.com')) {
@@ -250,7 +259,7 @@ async function resolveSongs(query, requester, retry = 0) {
 
   } catch (error) {
     console.error('[resolveSongs Error]', error.message);
-    if (error.message.includes('429') && retry < maxRetries) {
+    if (error.message?.includes('429') && retry < maxRetries) {
       const waitTime = (retry + 1) * 12000;
       console.log(`⏳ Kena 429 → Tunggu ${waitTime / 1000}s (retry ${retry + 1}/${maxRetries})`);
       await sleep(waitTime);
