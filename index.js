@@ -81,11 +81,22 @@ const queues = new Map();
 
 // ====================== QUEUE FACTORY ======================
 function createQueue() {
+  const player = createAudioPlayer({
+    behaviors: { noSubscriber: NoSubscriberBehavior.Pause }
+  });
+
+  // 🔥 TAMBAHIN INI
+  player.on('stateChange', (oldState, newState) => {
+    console.log(`[Player] ${oldState.status} -> ${newState.status}`);
+  });
+
+  player.on('error', (error) => {
+    console.error('[Player Error]', error.message);
+  });
+
   return {
     songs: [],
-    player: createAudioPlayer({
-      behaviors: { noSubscriber: NoSubscriberBehavior.Pause }
-    }),
+    player,
     connection: null,
     textChannel: null,
     volume: 1,
@@ -184,7 +195,9 @@ async function playSong(guildId, queue) {
   try {
     console.log(`[playSong] Streaming: ${song.title}`);
     await sleep(850);
-    const stream = await playdl.stream(song.url, { quality: 2, discordPlayerCompatibility: true });
+const stream = await playdl.stream(song.url, {
+  discordPlayerCompatibility: true
+});
 
     const resource = createAudioResource(stream.stream, { inputType: stream.type, inlineVolume: true });
     resource.volume?.setVolume(queue.volume);
@@ -235,6 +248,29 @@ async function startConnection(queue, voiceChannel, guild) {
       selfDeaf: false,     // JANGAN DEAF
       selfMute: false
     });
+
+    // ✅ TAMBAHIN INI DI SINI
+connection.on('stateChange', (oldState, newState) => {
+  console.log(`[Voice State] ${oldState.status} -> ${newState.status}`);
+});
+
+connection.on('error', (err) => {
+  console.error('[Voice Connection Error]', err.message);
+});
+
+// 🔥 ANTI STUCK FIX
+connection.on(VoiceConnectionStatus.Disconnected, async () => {
+  try {
+    await Promise.race([
+      entersState(connection, VoiceConnectionStatus.Signalling, 5_000),
+      entersState(connection, VoiceConnectionStatus.Connecting, 5_000),
+    ]);
+    console.log('🔄 Reconnecting voice...');
+  } catch {
+    console.log('❌ Destroying connection...');
+    connection.destroy();
+  }
+});
 
     queue.connection = connection;
 
