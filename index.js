@@ -164,7 +164,7 @@ async function processYtQueue() {
 // ====================== QUEUE FACTORY ======================
 function createQueue() {
   const player = createAudioPlayer({
-    behaviors: { noSubscriber: NoSubscriberBehavior.Pause }
+    behaviors: { noSubscriber: NoSubscriberBehavior.Play }
   });
 
   player.on('stateChange', (oldState, newState) => {
