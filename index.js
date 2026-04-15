@@ -12,8 +12,10 @@ const {
 } = require('@discordjs/voice');
 const playdl = require('play-dl');
 const ytdl = require('@distube/ytdl-core');
+const { spawn } = require('child_process');
 
 // ====================== YT-DLP CONFIG ======================
+// Hanya dipakai untuk resolve info (dumpSingleJson), BUKAN untuk streaming
 const youtubedl = require('youtube-dl-exec').create({
   binPath: './yt-dlp.exe'
 });
@@ -282,16 +284,27 @@ async function resolveSongs(query, requester, retry = 0) {
       if (query.includes('youtube.com') || query.includes('youtu.be')) {
         await jitter(1500, 3000);
 
-        // Prioritas 1: yt-dlp untuk info (paling stabil & tahan rate limit)
+        // Prioritas 1: yt-dlp untuk info
+        // FIX: Gunakan youtubedl(url, options) bukan youtubedl.exec()
+        // youtubedl() langsung return parsed JSON object
+        // youtubedl.exec() return raw stdout string — itulah penyebab "input.split is not a function"
         try {
           console.log('[resolve] Mencoba yt-dlp untuk info...');
-const ytInfo = await youtubedl.exec(query, {
-  dumpSingleJson: true,
-  noWarnings: true,
-  quiet: true,
-  cookiefile: process.env.YOUTUBE_COOKIE_FILE || undefined,
-  'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-});
+          const ytdlpOptions = {
+            dumpSingleJson: true,
+            noWarnings: true,
+            quiet: true,
+            noCheckCertificates: true,
+            'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+          };
+          if (process.env.YOUTUBE_COOKIE_FILE) {
+            ytdlpOptions.cookies = process.env.YOUTUBE_COOKIE_FILE;
+          }
+
+          // Panggil youtubedl() langsung (bukan .exec()) → return object JSON
+          const ytInfo = await youtubedl(query, ytdlpOptions);
+
+          if (!ytInfo || !ytInfo.title) throw new Error('yt-dlp tidak mengembalikan data valid');
 
           const songs = [{
             title: ytInfo.title,
@@ -365,41 +378,55 @@ const ytInfo = await youtubedl.exec(query, {
 }
 
 // ====================== GET STREAM ======================
+// FIX: Gunakan child_process.spawn langsung untuk streaming yt-dlp
+// youtubedl.exec() tidak return child_process yang bisa di-pipe stdout-nya dengan benar
 async function getStream(url, retry = 0) {
   const maxRetries = 3;
 
-  // ── 1. yt-dlp (prioritas utama) ──
+  // ── 1. yt-dlp via spawn (prioritas utama) ──
   try {
-    console.log('[Stream] Mencoba yt-dlp...');
+    console.log('[Stream] Mencoba yt-dlp via spawn...');
 
-const ytdlpArgs = {
-  format: 'bestaudio[ext=webm]/bestaudio[ext=opus]/bestaudio/best',
-  output: '-',
-  quiet: true,
-  noWarnings: true,
-  noCheckCertificates: true,
-  'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-};
+    const args = [
+      url,
+      '--format', 'bestaudio[ext=webm]/bestaudio[ext=opus]/bestaudio/best',
+      '--output', '-',
+      '--quiet',
+      '--no-warnings',
+      '--no-check-certificates',
+      '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+    ];
 
-if (process.env.YOUTUBE_COOKIE_FILE) {
-  ytdlpArgs.cookiefile = process.env.YOUTUBE_COOKIE_FILE;
-  console.log(`[yt-dlp] Menggunakan cookies file: ${process.env.YOUTUBE_COOKIE_FILE}`);
-}
+    if (process.env.YOUTUBE_COOKIE_FILE) {
+      args.push('--cookies', process.env.YOUTUBE_COOKIE_FILE);
+      console.log(`[yt-dlp] Menggunakan cookies file: ${process.env.YOUTUBE_COOKIE_FILE}`);
+    }
 
-    const subprocess = youtubedl.exec(url, ytdlpArgs, { 
-      stdio: ['ignore', 'pipe', 'pipe'] 
+    const subprocess = spawn('./yt-dlp.exe', args, {
+      stdio: ['ignore', 'pipe', 'pipe']
     });
 
-    const stream = subprocess.stdout;
-    if (!stream) throw new Error('yt-dlp stdout null');
+    // Validasi: pastikan stdout tersedia
+    if (!subprocess.stdout) throw new Error('yt-dlp stdout null');
 
+    // Log stderr tapi jangan throw
     subprocess.stderr?.on('data', (data) => {
       const msg = data.toString().trim();
       if (msg) console.warn('[yt-dlp stderr]', msg);
     });
 
-    console.log('[Stream] ✅ yt-dlp berhasil');
-    return { stream, type: StreamType.Arbitrary };
+    // Deteksi error fatal dari process exit
+    await new Promise((resolve, reject) => {
+      subprocess.stdout.once('data', resolve);  // ada data = sukses
+      subprocess.once('error', reject);          // spawn gagal
+      subprocess.once('close', (code) => {
+        if (code !== 0 && code !== null) reject(new Error(`yt-dlp exit code ${code}`));
+      });
+      setTimeout(resolve, 3000); // timeout 3s lanjut saja
+    });
+
+    console.log('[Stream] ✅ yt-dlp via spawn berhasil');
+    return { stream: subprocess.stdout, type: StreamType.Arbitrary };
   } catch (ytdlpErr) {
     console.warn('[Stream] ❌ yt-dlp gagal:', ytdlpErr.message);
   }
@@ -408,9 +435,9 @@ if (process.env.YOUTUBE_COOKIE_FILE) {
   try {
     console.log('[Stream] Mencoba play-dl...');
     await jitter(800, 1500);
-    const streamData = await playdl.stream(url, { 
+    const streamData = await playdl.stream(url, {
       quality: 2,
-      discordPlayerCompatibility: true 
+      discordPlayerCompatibility: true
     });
     console.log('[Stream] ✅ play-dl berhasil');
     return { stream: streamData.stream, type: streamData.type };
@@ -487,7 +514,7 @@ async function playSong(guildId, queue) {
   }
 }
 
-// ====================== START CONNECTION ====================== (tetap sama)
+// ====================== START CONNECTION ======================
 async function startConnection(queue, voiceChannel, guild) {
   try {
     const oldConn = getVoiceConnection(guild.id);
@@ -537,7 +564,7 @@ async function startConnection(queue, voiceChannel, guild) {
   }
 }
 
-// ====================== COMMANDS ====================== (semua command tetap sama)
+// ====================== COMMANDS ======================
 async function cmdPlay(message, query) {
   if (!query) return message.reply('❌ Masukkan judul lagu atau link!\n`!play <judul / link>`');
   const voiceChannel = message.member?.voice.channel;
