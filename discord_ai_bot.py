@@ -22,7 +22,7 @@ MAX_HISTORY = 10
 MAX_RETRIES = 3
 COOLDOWN_RATE = 3       # max request per user
 COOLDOWN_PER = 60       # per detik (1 menit)
-MODEL_NAME = "gemini-1.5-flash"  # FIX: model tersedia & rate limit lebih longgar
+MODEL_NAME = "gemini-1.5-flash-latest"  # FIX: model tersedia & rate limit lebih longgar
 # ============================================================
 
 # Setup Gemini (SDK baru)
