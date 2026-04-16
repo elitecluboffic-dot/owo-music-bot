@@ -16,7 +16,7 @@ AI_PERSONALITY = """Kamu adalah Jarvis, asisten AI yang cerdas, ramah, dan sedik
 Kamu menjawab dalam bahasa yang sama dengan pengguna (Indonesia atau Inggris).
 Jawaban kamu singkat, padat, dan mudah dipahami. Gunakan emoji secukupnya."""
 
-PREFIX = "!"
+PREFIX = ["!", "/"]
 MAX_HISTORY = 6
 MAX_RETRIES = 3
 COOLDOWN_RATE = 3
