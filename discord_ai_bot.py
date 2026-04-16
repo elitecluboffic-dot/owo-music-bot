@@ -7,8 +7,10 @@ from datetime import datetime
 # ============================================================
 #  KONFIGURASI - ISI DI SINI
 # ============================================================
-DISCORD_TOKEN = "TOKEN_BOT_DISCORD_KAMU_DI_SINI"
-ANTHROPIC_API_KEY = "API_KEY_ANTHROPIC_KAMU_DI_SINI"
+import os
+DISCORD_TOKEN = os.environ.get("DISCORD_TOKEN")
+ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY")
+
 
 # Nama & kepribadian AI kamu
 AI_NAME = "Jarvis"
