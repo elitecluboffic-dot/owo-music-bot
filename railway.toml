@@ -1,9 +1,6 @@
 [build]
 builder = "nixpacks"
 
-[build.env]
-YOUTUBE_DL_SKIP_PYTHON_CHECK = "1"
-
 [deploy]
 startCommand = "node index.js"
 
