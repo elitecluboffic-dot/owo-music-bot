@@ -22,7 +22,7 @@ MAX_HISTORY = 10
 MAX_RETRIES = 3
 COOLDOWN_RATE = 3       # max request per user
 COOLDOWN_PER = 60       # per detik (1 menit)
-MODEL_NAME = "gemini-2.0-flash"
+MODEL_NAME = "gemini-2.0-flash-lite"  # FIX: model tersedia & rate limit lebih longgar
 # ============================================================
 
 # Setup Gemini (SDK baru)
@@ -86,7 +86,9 @@ async def ask_gemini(history: list, pertanyaan: str) -> str:
             err_str = str(e)
             if "429" in err_str:
                 if attempt < MAX_RETRIES - 1:
-                    raise RateLimitError(60 * (attempt + 1))
+                    wait = 15 * (attempt + 1)  # FIX: 15s, 30s lalu baru raise
+                    await asyncio.sleep(wait)
+                    continue
                 else:
                     raise RateLimitError(None)
             else:
@@ -189,24 +191,12 @@ async def ai_command(ctx, *, pertanyaan: str):
             else:
                 await ctx.reply(embed=embed)
 
-        except RateLimitError as e:
-            if e.retry_after:
-                await ctx.reply(
-                    f"⏳ API Gemini sedang kelebihan beban.\n"
-                    f"Otomatis retry dalam **{e.retry_after} detik**... Tunggu sebentar!"
-                )
-                await asyncio.sleep(e.retry_after)
-                try:
-                    history = conversation_history.get(user_id, [])[-MAX_HISTORY:]
-                    jawaban = await ask_gemini(history, pertanyaan)
-                    await ctx.reply(f"🤖 **{AI_NAME}:** {jawaban[:1990]}")
-                except Exception:
-                    await ctx.reply("❌ Masih gagal setelah retry. Coba lagi nanti ya!")
-            else:
-                await ctx.reply(
-                    "❌ **Quota API Gemini habis!**\n"
-                    "Kemungkinan limit harian sudah tercapai. Coba lagi besok atau ganti API key 🙏"
-                )
+        except RateLimitError:
+            # FIX: retry sudah dilakukan di dalam ask_gemini, jika sampai sini berarti benar-benar habis
+            await ctx.reply(
+                "❌ **Quota API Gemini habis!**\n"
+                "Limit harian sudah tercapai. Coba lagi besok atau ganti API key 🙏"
+            )
 
         except Exception as e:
             await ctx.reply(f"❌ **Terjadi error:** `{str(e)[:500]}`")
@@ -282,7 +272,7 @@ async def info(ctx):
         timestamp=datetime.now()
     )
     embed.add_field(name="🤖 Nama", value=AI_NAME, inline=True)
-    embed.add_field(name="🧠 Model AI", value="Gemini 1.5 Flash 8B (Google)", inline=True)
+    embed.add_field(name="🧠 Model AI", value="Gemini 2.0 Flash Lite (Google)", inline=True)  # FIX: updated model name
     embed.add_field(name="📡 Server", value=f"{len(bot.guilds)}", inline=True)
     embed.add_field(name="👥 Users", value=f"{len(bot.users)}", inline=True)
     embed.add_field(name="🔧 Prefix", value=f"`{PREFIX}`", inline=True)
