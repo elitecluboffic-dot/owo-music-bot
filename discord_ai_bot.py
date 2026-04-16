@@ -2,6 +2,7 @@ import discord
 from discord.ext import commands
 import google.generativeai as genai
 import os
+import asyncio
 from datetime import datetime
 
 # ============================================================
@@ -16,12 +17,16 @@ Kamu menjawab dalam bahasa yang sama dengan pengguna (Indonesia atau Inggris).
 Jawaban kamu singkat, padat, dan mudah dipahami. Gunakan emoji secukupnya."""
 
 PREFIX = "!"
+MAX_HISTORY = 10
+MAX_RETRIES = 3
+COOLDOWN_RATE = 3       # max request per user
+COOLDOWN_PER = 60       # per detik (1 menit)
 # ============================================================
 
 # Setup Gemini
 genai.configure(api_key=GEMINI_API_KEY)
 model = genai.GenerativeModel(
-    model_name="gemini-2.0-flash",
+    model_name="gemini-1.5-flash-8b",  # Limit free tier lebih besar
     system_instruction=AI_PERSONALITY
 )
 
@@ -34,9 +39,36 @@ bot = commands.Bot(command_prefix=PREFIX, intents=intents, help_command=None)
 
 # Riwayat percakapan per user
 conversation_history: dict[int, list] = {}
-MAX_HISTORY = 10
 
 
+# ============================================================
+#  HELPER: Kirim ke Gemini dengan retry otomatis
+# ============================================================
+async def ask_gemini(history: list, pertanyaan: str) -> str:
+    for attempt in range(MAX_RETRIES):
+        try:
+            chat = model.start_chat(history=history[:-1])
+            response = await asyncio.to_thread(chat.send_message, pertanyaan)
+            return response.text
+        except Exception as e:
+            err_str = str(e)
+            if "429" in err_str:
+                if attempt < MAX_RETRIES - 1:
+                    wait_time = 60 * (attempt + 1)
+                    raise RateLimitError(wait_time)
+                else:
+                    raise RateLimitError(None)  # Semua retry gagal
+            else:
+                raise e
+
+class RateLimitError(Exception):
+    def __init__(self, retry_after):
+        self.retry_after = retry_after
+
+
+# ============================================================
+#  EVENTS
+# ============================================================
 @bot.event
 async def on_ready():
     print("=" * 50)
@@ -59,39 +91,54 @@ async def on_command_error(ctx, error):
         return
     elif isinstance(error, commands.MissingRequiredArgument):
         await ctx.reply(f"❌ Kurang argumen! Contoh: `{PREFIX}ai halo siapa kamu?`")
+    elif isinstance(error, commands.CommandOnCooldown):
+        await ctx.reply(
+            f"⏳ Pelan-pelan! Kamu terlalu banyak request.\n"
+            f"Coba lagi dalam **{error.retry_after:.0f} detik**."
+        )
     else:
         await ctx.reply(f"❌ Terjadi error: `{str(error)}`")
 
 
+# ============================================================
+#  COMMAND: !ai
+# ============================================================
 @bot.command(name="ai", aliases=["tanya", "ask"])
+@commands.cooldown(rate=COOLDOWN_RATE, per=COOLDOWN_PER, type=commands.BucketType.user)
 async def ai_command(ctx, *, pertanyaan: str):
     user_id = ctx.author.id
 
     async with ctx.typing():
         try:
+            # Init history user
             if user_id not in conversation_history:
                 conversation_history[user_id] = []
 
+            # Tambah pesan user ke history
             conversation_history[user_id].append({
                 "role": "user",
                 "parts": [pertanyaan]
             })
 
+            # Ambil history terbaru
             history = conversation_history[user_id][-MAX_HISTORY:]
-            chat = model.start_chat(history=history[:-1])
-            response = chat.send_message(pertanyaan)
-            jawaban = response.text
 
+            # Kirim ke Gemini
+            jawaban = await ask_gemini(history, pertanyaan)
+
+            # Simpan jawaban ke history
             conversation_history[user_id].append({
                 "role": "model",
                 "parts": [jawaban]
             })
 
+            # Trim history agar tidak membengkak
             if len(conversation_history[user_id]) > MAX_HISTORY * 2:
                 conversation_history[user_id] = conversation_history[user_id][-MAX_HISTORY:]
 
+            # Buat embed
             embed = discord.Embed(
-                description=jawaban,
+                description=jawaban[:4096],
                 color=discord.Color.blurple(),
                 timestamp=datetime.now()
             )
@@ -106,6 +153,7 @@ async def ai_command(ctx, *, pertanyaan: str):
                 icon_url=ctx.author.display_avatar.url
             )
 
+            # Kirim (handle jawaban panjang)
             if len(jawaban) > 4000:
                 chunks = [jawaban[i:i+1990] for i in range(0, len(jawaban), 1990)]
                 await ctx.reply(f"🤖 **{AI_NAME}:** (jawaban panjang)")
@@ -114,10 +162,33 @@ async def ai_command(ctx, *, pertanyaan: str):
             else:
                 await ctx.reply(embed=embed)
 
+        except RateLimitError as e:
+            if e.retry_after:
+                await ctx.reply(
+                    f"⏳ API Gemini sedang kelebihan beban.\n"
+                    f"Otomatis retry dalam **{e.retry_after} detik**... Tunggu sebentar!"
+                )
+                await asyncio.sleep(e.retry_after)
+                # Coba sekali lagi setelah tunggu
+                try:
+                    history = conversation_history.get(user_id, [])[-MAX_HISTORY:]
+                    jawaban = await ask_gemini(history, pertanyaan)
+                    await ctx.reply(f"🤖 **{AI_NAME}:** {jawaban[:1990]}")
+                except Exception:
+                    await ctx.reply("❌ Masih gagal setelah retry. Coba lagi nanti ya!")
+            else:
+                await ctx.reply(
+                    "❌ **Quota API Gemini habis!**\n"
+                    "Kemungkinan limit harian sudah tercapai. Coba lagi besok atau ganti API key 🙏"
+                )
+
         except Exception as e:
-            await ctx.reply(f"❌ **Terjadi error:** `{str(e)}`")
+            await ctx.reply(f"❌ **Terjadi error:** `{str(e)[:500]}`")
 
 
+# ============================================================
+#  COMMAND: !reset
+# ============================================================
 @bot.command(name="reset", aliases=["clear", "hapus"])
 async def reset_history(ctx):
     user_id = ctx.author.id
@@ -130,6 +201,9 @@ async def reset_history(ctx):
     await ctx.reply(embed=embed)
 
 
+# ============================================================
+#  COMMAND: !help
+# ============================================================
 @bot.command(name="help", aliases=["bantuan", "cmd"])
 async def help_command(ctx):
     embed = discord.Embed(
@@ -151,6 +225,9 @@ async def help_command(ctx):
     await ctx.reply(embed=embed)
 
 
+# ============================================================
+#  COMMAND: !ping
+# ============================================================
 @bot.command(name="ping")
 async def ping(ctx):
     latency = round(bot.latency * 1000)
@@ -168,6 +245,9 @@ async def ping(ctx):
     await ctx.reply(embed=embed)
 
 
+# ============================================================
+#  COMMAND: !info
+# ============================================================
 @bot.command(name="info")
 async def info(ctx):
     embed = discord.Embed(
@@ -176,7 +256,7 @@ async def info(ctx):
         timestamp=datetime.now()
     )
     embed.add_field(name="🤖 Nama", value=AI_NAME, inline=True)
-    embed.add_field(name="🧠 Model AI", value="Gemini 2.0 Flash (Google)", inline=True)
+    embed.add_field(name="🧠 Model AI", value="Gemini 1.5 Flash 8B (Google)", inline=True)
     embed.add_field(name="📡 Server", value=f"{len(bot.guilds)}", inline=True)
     embed.add_field(name="👥 Users", value=f"{len(bot.users)}", inline=True)
     embed.add_field(name="🔧 Prefix", value=f"`{PREFIX}`", inline=True)
@@ -186,6 +266,7 @@ async def info(ctx):
     await ctx.reply(embed=embed)
 
 
+# ============================================================
 if __name__ == "__main__":
     print("🚀 Menjalankan bot...")
     bot.run(DISCORD_TOKEN)
