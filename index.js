@@ -13,22 +13,64 @@ const {
 const playdl = require('play-dl');
 const ytdl = require('@distube/ytdl-core');
 const { spawn } = require('child_process');
+const fs = require('fs');
+const path = require('path');
 
-// ====================== YT-DLP CONFIG ======================
-// Hanya dipakai untuk resolve info (dumpSingleJson), BUKAN untuk streaming
-const youtubedl = require('youtube-dl-exec').create({
-  binPath: './yt-dlp.exe'
-});
+// ====================== YT-DLP BINARY ======================
+// Otomatis deteksi OS: Windows pakai yt-dlp.exe, Linux/Railway pakai yt-dlp
+const YTDLP_BIN = (() => {
+  const winPath = path.resolve('./yt-dlp.exe');
+  const linuxPath = path.resolve('./yt-dlp');
+  if (process.platform === 'win32' && fs.existsSync(winPath)) return winPath;
+  if (fs.existsSync(linuxPath)) return linuxPath;
+  // Fallback ke PATH system
+  return process.platform === 'win32' ? 'yt-dlp.exe' : 'yt-dlp';
+})();
+console.log(`[yt-dlp] Binary: ${YTDLP_BIN}`);
+
+// Pastikan yt-dlp executable di Linux
+if (process.platform !== 'win32' && fs.existsSync(YTDLP_BIN)) {
+  try { fs.chmodSync(YTDLP_BIN, '755'); } catch (_) {}
+}
+
+const youtubedl = require('youtube-dl-exec').create({ binPath: YTDLP_BIN });
+
+// ====================== HELPERS ======================
+const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+function jitter(min, max) {
+  return sleep(Math.floor(Math.random() * (max - min + 1)) + min);
+}
+function formatDuration(seconds) {
+  if (!seconds || isNaN(seconds)) return '00:00';
+  const m = Math.floor(seconds / 60);
+  const s = Math.floor(seconds % 60);
+  return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+}
+function extractCleanUrl(input) {
+  if (typeof input !== 'string') input = String(input);
+  const match = input.match(/(?:youtu\.be\/|youtube\.com\/(?:watch\?v=|shorts\/))([a-zA-Z0-9_-]{11})/);
+  return match ? `https://www.youtube.com/watch?v=${match[1]}` : input.trim();
+}
 
 // ====================== YOUTUBE COOKIES ======================
+let cookiesFilePath = null;
+
 function loadYouTubeCookies() {
-  // Prioritas 1: Cookie File (Netscape format) - paling direkomendasikan
-  if (process.env.YOUTUBE_COOKIE_FILE) {
-    console.log(`🔄 Menggunakan cookies file: ${process.env.YOUTUBE_COOKIE_FILE}`);
+  // Prioritas 1: Cookie File path dari env
+  if (process.env.YOUTUBE_COOKIE_FILE && fs.existsSync(process.env.YOUTUBE_COOKIE_FILE)) {
+    cookiesFilePath = process.env.YOUTUBE_COOKIE_FILE;
+    console.log(`🔄 Menggunakan cookies file: ${cookiesFilePath}`);
+
+    // Set ke play-dl juga
+    try {
+      const cookieContent = fs.readFileSync(cookiesFilePath, 'utf-8');
+      const parsed = parseNetscapeCookies(cookieContent);
+      if (parsed) playdl.setToken({ youtube: { cookie: parsed } });
+    } catch (_) {}
     return;
   }
 
-  // Prioritas 2: Cookie string (cara lama)
+  // Prioritas 2: Cookie string dari env
   let cookieInput = process.env.YOUTUBE_COOKIE?.trim();
   if (!cookieInput) {
     console.log('⚠️ YOUTUBE_COOKIE dan YOUTUBE_COOKIE_FILE belum diisi');
@@ -36,43 +78,51 @@ function loadYouTubeCookies() {
     return;
   }
 
+  // Jika format Netscape, simpan ke file dulu supaya yt-dlp bisa pakai
   if (cookieInput.includes('.youtube.com') || cookieInput.includes('Netscape')) {
-    console.log('🔄 Mendeteksi format Netscape cookies.txt...');
-    const lines = cookieInput.split('\n');
-    const cookieParts = [];
-    for (const line of lines) {
-      const trimmed = line.trim();
-      if (trimmed === '' || trimmed.startsWith('#')) continue;
-      const parts = trimmed.split(/\s+/);
-      if (parts.length < 7) continue;
-      const name = parts[5];
-      const value = parts[6];
-      if ([
-        'SID', 'HSID', 'SSID', 'APISID', 'SAPISID',
-        '__Secure-1PSID', '__Secure-3PSID',
-        '__Secure-1PAPISID', '__Secure-3PAPISID',
-        '__Secure-1PSIDTS', '__Secure-3PSIDTS',
-        '__Secure-1PSIDCC', '__Secure-3PSIDCC'
-      ].includes(name)) {
-        cookieParts.push(`${name}=${value}`);
-      }
+    const tmpPath = path.resolve('./cookies.txt');
+    try {
+      fs.writeFileSync(tmpPath, cookieInput, 'utf-8');
+      cookiesFilePath = tmpPath;
+      console.log(`✅ Cookie Netscape disimpan ke ${tmpPath}`);
+    } catch (_) {}
+
+    const parsed = parseNetscapeCookies(cookieInput);
+    if (parsed) {
+      try { playdl.setToken({ youtube: { cookie: parsed } }); } catch (_) {}
     }
-    cookieInput = cookieParts.join('; ');
-    console.log(`✅ Parse Netscape berhasil → ${cookieParts.length} cookie diambil`);
+    return;
   }
 
-  if (cookieInput.length < 500) {
-    console.log(`⚠️ Cookie terlalu pendek (${cookieInput.length} char), tetap dicoba...`);
-  }
-
+  // Cookie string biasa
   try {
     playdl.setToken({ youtube: { cookie: cookieInput } });
-    console.log(`✅ YouTube cookies berhasil dimuat! (${cookieInput.length} karakter)`);
+    console.log(`✅ YouTube cookies dimuat (${cookieInput.length} char)`);
   } catch (err) {
     console.error('❌ Error set cookie:', err.message);
-    try { playdl.setToken({ youtube: { cookie: '' } }); } catch (_) {}
   }
 }
+
+function parseNetscapeCookies(content) {
+  const lines = content.split('\n');
+  const parts = [];
+  const wanted = [
+    'SID', 'HSID', 'SSID', 'APISID', 'SAPISID',
+    '__Secure-1PSID', '__Secure-3PSID',
+    '__Secure-1PAPISID', '__Secure-3PAPISID',
+    '__Secure-1PSIDTS', '__Secure-3PSIDTS',
+    '__Secure-1PSIDCC', '__Secure-3PSIDCC'
+  ];
+  for (const line of lines) {
+    const t = line.trim();
+    if (!t || t.startsWith('#')) continue;
+    const cols = t.split(/\s+/);
+    if (cols.length < 7) continue;
+    if (wanted.includes(cols[5])) parts.push(`${cols[5]}=${cols[6]}`);
+  }
+  return parts.length > 0 ? parts.join('; ') : null;
+}
+
 loadYouTubeCookies();
 
 // ====================== YTDL AGENT ======================
@@ -81,14 +131,13 @@ try {
   const rawCookies = process.env.YTDL_COOKIES;
   if (rawCookies) {
     ytdlAgent = ytdl.createAgent(JSON.parse(rawCookies));
-    console.log('✅ ytdl-core agent berhasil dibuat dari YTDL_COOKIES!');
+    console.log('✅ ytdl-core agent dari YTDL_COOKIES');
   } else {
     ytdlAgent = ytdl.createAgent();
     console.log('ℹ️ ytdl-core agent tanpa cookies');
   }
 } catch (e) {
   console.warn('⚠️ Gagal buat ytdl agent:', e.message);
-  ytdlAgent = undefined;
 }
 
 // ====================== CLIENT SETUP ======================
@@ -103,63 +152,34 @@ const client = new Client({
 const queues = new Map();
 const PREFIX = '!';
 
-// ====================== HELPERS ======================
-const sleep = (ms) => new Promise(r => setTimeout(r, ms));
-
-function jitter(min, max) {
-  return sleep(Math.floor(Math.random() * (max - min + 1)) + min);
-}
-
-function formatDuration(seconds) {
-  if (!seconds || isNaN(seconds)) return '00:00';
-  const m = Math.floor(seconds / 60);
-  const s = Math.floor(seconds % 60);
-  return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
-}
-
 // ====================== SONG CACHE ======================
 const songCache = new Map();
 const CACHE_TTL = 10 * 60 * 1000;
-
 function getCached(key) {
   const entry = songCache.get(key);
   if (!entry) return null;
-  if (Date.now() - entry.timestamp > CACHE_TTL) {
-    songCache.delete(key);
-    return null;
-  }
+  if (Date.now() - entry.timestamp > CACHE_TTL) { songCache.delete(key); return null; }
   return entry.songs;
 }
-
 function setCache(key, songs) {
-  if (songCache.size >= 200) {
-    const firstKey = songCache.keys().next().value;
-    songCache.delete(firstKey);
-  }
+  if (songCache.size >= 200) songCache.delete(songCache.keys().next().value);
   songCache.set(key, { songs, timestamp: Date.now() });
 }
 
 // ====================== REQUEST QUEUE ======================
 let ytRequestRunning = false;
 const ytRequestQueue = [];
-
 function enqueueYtRequest(fn) {
   return new Promise((resolve, reject) => {
     ytRequestQueue.push({ fn, resolve, reject });
     processYtQueue();
   });
 }
-
 async function processYtQueue() {
   if (ytRequestRunning || ytRequestQueue.length === 0) return;
   ytRequestRunning = true;
   const { fn, resolve, reject } = ytRequestQueue.shift();
-  try {
-    const result = await fn();
-    resolve(result);
-  } catch (err) {
-    reject(err);
-  } finally {
+  try { resolve(await fn()); } catch (err) { reject(err); } finally {
     ytRequestRunning = false;
     await jitter(1500, 3000);
     processYtQueue();
@@ -168,33 +188,16 @@ async function processYtQueue() {
 
 // ====================== QUEUE FACTORY ======================
 function createQueue() {
-  const player = createAudioPlayer({
-    behaviors: { noSubscriber: NoSubscriberBehavior.Play }
-  });
-  player.on('stateChange', (oldState, newState) => {
-    console.log(`[Player] ${oldState.status} -> ${newState.status}`);
-  });
-  player.on('error', (error) => {
-    console.error('[Player Error]', error.message);
-  });
-  return {
-    songs: [],
-    player,
-    connection: null,
-    textChannel: null,
-    volume: 1,
-    loop: false
-  };
+  const player = createAudioPlayer({ behaviors: { noSubscriber: NoSubscriberBehavior.Play } });
+  player.on('stateChange', (o, n) => console.log(`[Player] ${o.status} -> ${n.status}`));
+  player.on('error', (e) => console.error('[Player Error]', e.message));
+  return { songs: [], player, connection: null, textChannel: null, volume: 1, loop: false };
 }
 
 // ====================== SPOTIFY LOGIN ======================
 async function loginSpotify() {
   try {
-    if (
-      process.env.SPOTIFY_CLIENT_ID &&
-      process.env.SPOTIFY_CLIENT_SECRET &&
-      process.env.SPOTIFY_REFRESH_TOKEN
-    ) {
+    if (process.env.SPOTIFY_CLIENT_ID && process.env.SPOTIFY_CLIENT_SECRET && process.env.SPOTIFY_REFRESH_TOKEN) {
       await playdl.setToken({
         spotify: {
           client_id: process.env.SPOTIFY_CLIENT_ID,
@@ -205,9 +208,7 @@ async function loginSpotify() {
       });
       console.log('✅ Spotify berhasil terhubung!');
     }
-  } catch (e) {
-    console.log('⚠️ Spotify gagal login:', e.message);
-  }
+  } catch (e) { console.log('⚠️ Spotify gagal login:', e.message); }
 }
 
 // ====================== BOT READY ======================
@@ -224,6 +225,8 @@ client.once('clientReady', onReady);
 // ====================== RESOLVE SONGS ======================
 async function resolveSongs(query, requester, retry = 0) {
   const maxRetries = 4;
+  // Pastikan query selalu string
+  if (typeof query !== 'string') query = String(query);
   const cacheKey = query.toLowerCase().trim();
   const cached = getCached(cacheKey);
   if (cached) {
@@ -234,27 +237,16 @@ async function resolveSongs(query, requester, retry = 0) {
   return enqueueYtRequest(async () => {
     try {
       await jitter(2000, 4000);
-      try {
-        if (playdl.is_expired?.() && process.env.SPOTIFY_CLIENT_ID) await loginSpotify();
-      } catch (_) {}
+      try { if (playdl.is_expired?.() && process.env.SPOTIFY_CLIENT_ID) await loginSpotify(); } catch (_) {}
 
       // ===== SPOTIFY =====
       if (query.includes('spotify.com')) {
         const info = await playdl.spotify(query);
         if (info.type === 'track') {
           await jitter(1000, 2000);
-          const ytResult = await playdl.search(
-            `${info.name} ${info.artists[0].name}`,
-            { source: { youtube: 'video' }, limit: 1 }
-          );
+          const ytResult = await playdl.search(`${info.name} ${info.artists[0].name}`, { source: { youtube: 'video' }, limit: 1 });
           if (!ytResult.length) throw new Error('Tidak ditemukan di YouTube');
-          const songs = [{
-            title: info.name,
-            url: ytResult[0].url,
-            duration: formatDuration(info.durationInSec),
-            requestedBy: requester,
-            thumbnail: info.thumbnail?.url || ytResult[0].thumbnails?.[0]?.url
-          }];
+          const songs = [{ title: info.name, url: ytResult[0].url, duration: formatDuration(info.durationInSec), requestedBy: requester, thumbnail: info.thumbnail?.url || ytResult[0].thumbnails?.[0]?.url }];
           setCache(cacheKey, songs);
           return songs;
         }
@@ -262,18 +254,9 @@ async function resolveSongs(query, requester, retry = 0) {
           const songs = [];
           for (const track of info.tracks || []) {
             await jitter(1200, 2500);
-            const ytSearch = await playdl.search(
-              `${track.name} ${track.artists[0].name}`,
-              { source: { youtube: 'video' }, limit: 1 }
-            );
+            const ytSearch = await playdl.search(`${track.name} ${track.artists[0].name}`, { source: { youtube: 'video' }, limit: 1 });
             if (ytSearch.length > 0) {
-              songs.push({
-                title: track.name,
-                url: ytSearch[0].url,
-                duration: formatDuration(track.durationInSec),
-                requestedBy: requester,
-                thumbnail: track.thumbnail?.url || ytSearch[0].thumbnails?.[0]?.url
-              });
+              songs.push({ title: track.name, url: ytSearch[0].url, duration: formatDuration(track.durationInSec), requestedBy: requester, thumbnail: track.thumbnail?.url || ytSearch[0].thumbnails?.[0]?.url });
             }
           }
           return songs;
@@ -283,11 +266,9 @@ async function resolveSongs(query, requester, retry = 0) {
       // ===== YOUTUBE URL =====
       if (query.includes('youtube.com') || query.includes('youtu.be')) {
         await jitter(1500, 3000);
+        const cleanUrl = extractCleanUrl(query); // FIX: selalu string bersih
 
-        // Prioritas 1: yt-dlp untuk info
-        // FIX: Gunakan youtubedl(url, options) bukan youtubedl.exec()
-        // youtubedl() langsung return parsed JSON object
-        // youtubedl.exec() return raw stdout string — itulah penyebab "input.split is not a function"
+        // Prioritas 1: yt-dlp
         try {
           console.log('[resolve] Mencoba yt-dlp untuk info...');
           const ytdlpOptions = {
@@ -297,56 +278,38 @@ async function resolveSongs(query, requester, retry = 0) {
             noCheckCertificates: true,
             'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
           };
-          if (process.env.YOUTUBE_COOKIE_FILE) {
-            ytdlpOptions.cookies = process.env.YOUTUBE_COOKIE_FILE;
-          }
+          if (cookiesFilePath) ytdlpOptions.cookies = cookiesFilePath;
 
-          // Panggil youtubedl() langsung (bukan .exec()) → return object JSON
-          const ytInfo = await youtubedl(query, ytdlpOptions);
-
+          const ytInfo = await youtubedl(cleanUrl, ytdlpOptions); // FIX: pakai cleanUrl bukan query mentah
           if (!ytInfo || !ytInfo.title) throw new Error('yt-dlp tidak mengembalikan data valid');
 
-          const songs = [{
-            title: ytInfo.title,
-            url: ytInfo.webpage_url || query,
-            duration: formatDuration(ytInfo.duration),
-            requestedBy: requester,
-            thumbnail: ytInfo.thumbnail
-          }];
-
+          const songs = [{ title: ytInfo.title, url: ytInfo.webpage_url || cleanUrl, duration: formatDuration(ytInfo.duration), requestedBy: requester, thumbnail: ytInfo.thumbnail }];
           setCache(cacheKey, songs);
-          console.log(`[resolve] ✅ Berhasil pakai yt-dlp: ${ytInfo.title}`);
+          console.log(`[resolve] ✅ yt-dlp: ${ytInfo.title}`);
           return songs;
         } catch (ytErr) {
-          console.warn('[resolve] yt-dlp info gagal, fallback ke playdl:', ytErr.message);
+          console.warn('[resolve] yt-dlp gagal, fallback ke playdl:', ytErr.message);
         }
 
-        // Prioritas 2: Fallback ke playdl dengan backoff panjang
+        // Prioritas 2: play-dl
         let info;
         for (let attempt = 0; attempt <= 4; attempt++) {
           try {
-            info = await playdl.video_info(query);
+            info = await playdl.video_info(cleanUrl);
             break;
           } catch (err) {
             if (err.message.includes('429') && attempt < 4) {
               const wait = (attempt + 1) * 25000;
-              console.log(`⏳ 429 di video_info → tunggu ${wait / 1000}s (attempt ${attempt + 1}/4)`);
+              console.log(`⏳ 429 → tunggu ${wait / 1000}s`);
               await sleep(wait);
               continue;
             }
-            console.error('[resolve] playdl video_info gagal:', err.message);
+            console.error('[resolve] playdl gagal:', err.message);
             throw err;
           }
         }
-
         const details = info.video_details;
-        const songs = [{
-          title: details.title,
-          url: details.url,
-          duration: formatDuration(details.durationInSec),
-          requestedBy: requester,
-          thumbnail: details.thumbnails?.[0]?.url
-        }];
+        const songs = [{ title: details.title, url: details.url, duration: formatDuration(details.durationInSec), requestedBy: requester, thumbnail: details.thumbnails?.[0]?.url }];
         setCache(cacheKey, songs);
         return songs;
       }
@@ -355,20 +318,15 @@ async function resolveSongs(query, requester, retry = 0) {
       await jitter(800, 1500);
       const results = await playdl.search(query, { source: { youtube: 'video' }, limit: 1 });
       if (!results.length) return [];
-      const songs = [{
-        title: results[0].title,
-        url: results[0].url,
-        duration: formatDuration(results[0].durationInSec),
-        requestedBy: requester,
-        thumbnail: results[0].thumbnails?.[0]?.url
-      }];
+      const songs = [{ title: results[0].title, url: results[0].url, duration: formatDuration(results[0].durationInSec), requestedBy: requester, thumbnail: results[0].thumbnails?.[0]?.url }];
       setCache(cacheKey, songs);
       return songs;
+
     } catch (error) {
       console.error('[resolveSongs Error]', error.message);
       if (error.message?.includes('429') && retry < maxRetries) {
         const waitTime = Math.pow(2, retry + 1) * 8000;
-        console.log(`⏳ Kena 429 → Tunggu ${waitTime / 1000}s (retry ${retry + 1}/${maxRetries})`);
+        console.log(`⏳ 429 → Tunggu ${waitTime / 1000}s (retry ${retry + 1}/${maxRetries})`);
         await sleep(waitTime);
         return resolveSongs(query, requester, retry + 1);
       }
@@ -378,17 +336,15 @@ async function resolveSongs(query, requester, retry = 0) {
 }
 
 // ====================== GET STREAM ======================
-// FIX: Gunakan child_process.spawn langsung untuk streaming yt-dlp
-// youtubedl.exec() tidak return child_process yang bisa di-pipe stdout-nya dengan benar
 async function getStream(url, retry = 0) {
   const maxRetries = 3;
+  const cleanUrl = extractCleanUrl(url);
 
-  // ── 1. yt-dlp via spawn (prioritas utama) ──
+  // ── 1. yt-dlp via spawn ──
   try {
     console.log('[Stream] Mencoba yt-dlp via spawn...');
-
     const args = [
-      url,
+      cleanUrl,
       '--format', 'bestaudio[ext=webm]/bestaudio[ext=opus]/bestaudio/best',
       '--output', '-',
       '--quiet',
@@ -396,76 +352,59 @@ async function getStream(url, retry = 0) {
       '--no-check-certificates',
       '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
     ];
-
-    if (process.env.YOUTUBE_COOKIE_FILE) {
-      args.push('--cookies', process.env.YOUTUBE_COOKIE_FILE);
-      console.log(`[yt-dlp] Menggunakan cookies file: ${process.env.YOUTUBE_COOKIE_FILE}`);
+    if (cookiesFilePath) {
+      args.push('--cookies', cookiesFilePath);
+      console.log(`[yt-dlp] Pakai cookies: ${cookiesFilePath}`);
     }
 
-    const subprocess = spawn('./yt-dlp.exe', args, {
-      stdio: ['ignore', 'pipe', 'pipe']
-    });
-
-    // Validasi: pastikan stdout tersedia
+    const subprocess = spawn(YTDLP_BIN, args, { stdio: ['ignore', 'pipe', 'pipe'] });
     if (!subprocess.stdout) throw new Error('yt-dlp stdout null');
 
-    // Log stderr tapi jangan throw
-    subprocess.stderr?.on('data', (data) => {
-      const msg = data.toString().trim();
+    subprocess.stderr?.on('data', (d) => {
+      const msg = d.toString().trim();
       if (msg) console.warn('[yt-dlp stderr]', msg);
     });
 
-    // Deteksi error fatal dari process exit
     await new Promise((resolve, reject) => {
-      subprocess.stdout.once('data', resolve);  // ada data = sukses
-      subprocess.once('error', reject);          // spawn gagal
+      subprocess.stdout.once('data', resolve);
+      subprocess.once('error', reject);
       subprocess.once('close', (code) => {
-        if (code !== 0 && code !== null) reject(new Error(`yt-dlp exit code ${code}`));
+        if (code !== 0 && code !== null) reject(new Error(`yt-dlp exit ${code}`));
       });
-      setTimeout(resolve, 3000); // timeout 3s lanjut saja
+      setTimeout(resolve, 3000);
     });
 
-    console.log('[Stream] ✅ yt-dlp via spawn berhasil');
+    console.log('[Stream] ✅ yt-dlp berhasil');
     return { stream: subprocess.stdout, type: StreamType.Arbitrary };
-  } catch (ytdlpErr) {
-    console.warn('[Stream] ❌ yt-dlp gagal:', ytdlpErr.message);
+  } catch (e) {
+    console.warn('[Stream] ❌ yt-dlp gagal:', e.message);
   }
 
   // ── 2. play-dl ──
   try {
     console.log('[Stream] Mencoba play-dl...');
     await jitter(800, 1500);
-    const streamData = await playdl.stream(url, {
-      quality: 2,
-      discordPlayerCompatibility: true
-    });
+    const streamData = await playdl.stream(cleanUrl, { quality: 2, discordPlayerCompatibility: true });
     console.log('[Stream] ✅ play-dl berhasil');
     return { stream: streamData.stream, type: streamData.type };
-  } catch (playdlErr) {
-    console.warn('[Stream] ❌ play-dl gagal:', playdlErr.message);
-    if (playdlErr.message.includes('429') && retry < maxRetries) {
-      const wait = (retry + 1) * 15000;
-      console.log(`⏳ 429 di play-dl → tunggu ${wait / 1000}s`);
-      await sleep(wait);
+  } catch (e) {
+    console.warn('[Stream] ❌ play-dl gagal:', e.message);
+    if (e.message.includes('429') && retry < maxRetries) {
+      await sleep((retry + 1) * 15000);
       return getStream(url, retry + 1);
     }
   }
 
   // ── 3. ytdl-core fallback ──
   try {
-    console.log('[Stream] Mencoba ytdl-core fallback...');
-    const ytdlOptions = {
-      filter: 'audioonly',
-      quality: 'highestaudio',
-      highWaterMark: 1 << 25
-    };
-    if (ytdlAgent) ytdlOptions.agent = ytdlAgent;
-
-    const stream = ytdl(url, ytdlOptions);
+    console.log('[Stream] Mencoba ytdl-core...');
+    const opts = { filter: 'audioonly', quality: 'highestaudio', highWaterMark: 1 << 25 };
+    if (ytdlAgent) opts.agent = ytdlAgent;
+    const stream = ytdl(cleanUrl, opts);
     console.log('[Stream] ✅ ytdl-core berhasil');
     return { stream, type: StreamType.Arbitrary };
-  } catch (ytdlErr) {
-    console.error('[Stream] ❌ ytdl-core gagal:', ytdlErr.message);
+  } catch (e) {
+    console.error('[Stream] ❌ ytdl-core gagal:', e.message);
     throw new Error('Semua metode stream gagal.');
   }
 }
@@ -481,10 +420,7 @@ async function playSong(guildId, queue) {
     console.log(`[playSong] Streaming: ${song.title}`);
     await jitter(500, 1000);
     const { stream, type } = await getStream(song.url);
-    const resource = createAudioResource(stream, {
-      inputType: type,
-      inlineVolume: true
-    });
+    const resource = createAudioResource(stream, { inputType: type, inlineVolume: true });
     resource.volume?.setVolume(queue.volume);
     queue.player.play(resource);
 
@@ -518,10 +454,7 @@ async function playSong(guildId, queue) {
 async function startConnection(queue, voiceChannel, guild) {
   try {
     const oldConn = getVoiceConnection(guild.id);
-    if (oldConn) {
-      oldConn.destroy();
-      await sleep(800);
-    }
+    if (oldConn) { oldConn.destroy(); await sleep(800); }
     console.log(`[Voice] Join ke: ${voiceChannel.name}`);
     const connection = joinVoiceChannel({
       channelId: voiceChannel.id,
@@ -530,21 +463,16 @@ async function startConnection(queue, voiceChannel, guild) {
       selfDeaf: false,
       selfMute: false
     });
-    connection.on('stateChange', (oldState, newState) => {
-      console.log(`[Voice State] ${oldState.status} -> ${newState.status}`);
-    });
-    connection.on('error', (err) => {
-      console.error('[Voice Connection Error]', err.message);
-    });
+    connection.on('stateChange', (o, n) => console.log(`[Voice State] ${o.status} -> ${n.status}`));
+    connection.on('error', (e) => console.error('[Voice Error]', e.message));
     connection.on(VoiceConnectionStatus.Disconnected, async () => {
       try {
         await Promise.race([
           entersState(connection, VoiceConnectionStatus.Signalling, 5_000),
           entersState(connection, VoiceConnectionStatus.Connecting, 5_000),
         ]);
-        console.log('🔄 Reconnecting voice...');
+        console.log('🔄 Reconnecting...');
       } catch {
-        console.log('❌ Destroying connection...');
         connection.destroy();
         queues.delete(guild.id);
       }
@@ -552,14 +480,13 @@ async function startConnection(queue, voiceChannel, guild) {
     queue.connection = connection;
     connection.subscribe(queue.player);
     await entersState(connection, VoiceConnectionStatus.Ready, 40_000);
-    console.log('✅ [Voice] Berhasil join voice channel!');
+    console.log('✅ [Voice] Berhasil join!');
     return true;
-  } catch (error) {
-    console.error('[Voice ERROR]', error.message);
-    const conn = getVoiceConnection(guild.id);
-    if (conn) conn.destroy();
+  } catch (e) {
+    console.error('[Voice ERROR]', e.message);
+    getVoiceConnection(guild.id)?.destroy();
     queues.delete(guild.id);
-    if (queue.textChannel) queue.textChannel.send('❌ Bot gagal join voice channel. Coba lagi.');
+    if (queue.textChannel) queue.textChannel.send('❌ Bot gagal join voice channel.');
     return false;
   }
 }
@@ -572,173 +499,111 @@ async function cmdPlay(message, query) {
   console.log(`[CMD PLAY] User: ${message.author.tag} | Query: ${query}`);
   const loadingMsg = await message.reply('🔍 Mencari lagu...');
   let queue = queues.get(message.guild.id);
-  if (!queue) {
-    queue = createQueue();
-    queues.set(message.guild.id, queue);
-  }
+  if (!queue) { queue = createQueue(); queues.set(message.guild.id, queue); }
   queue.textChannel = message.channel;
   try {
     const songs = await resolveSongs(query, message.author.tag);
-    if (!songs.length) return loadingMsg.edit('❌ Lagu tidak ditemukan atau kena rate limit. Coba lagi sebentar lagi.');
+    if (!songs.length) return loadingMsg.edit('❌ Lagu tidak ditemukan atau kena rate limit.');
     const wasEmpty = queue.songs.length === 0;
     queue.songs.push(...songs);
-    if (songs.length === 1) {
-      await loadingMsg.edit(`✅ **Ditambahkan:** ${songs[0].title}`);
-    } else {
-      await loadingMsg.edit(`✅ **Ditambahkan ${songs.length} lagu** ke antrian!`);
-    }
+    await loadingMsg.edit(songs.length === 1 ? `✅ **Ditambahkan:** ${songs[0].title}` : `✅ **Ditambahkan ${songs.length} lagu** ke antrian!`);
     if (wasEmpty) {
       const connected = await startConnection(queue, voiceChannel, message.guild);
-      if (connected) {
-        await sleep(500);
-        playSong(message.guild.id, queue);
-      }
+      if (connected) { await sleep(500); playSong(message.guild.id, queue); }
     }
   } catch (e) {
-    console.error(`[cmdPlay ERROR]`, e.message);
+    console.error('[cmdPlay ERROR]', e.message);
     await loadingMsg.edit('❌ Terjadi error saat memproses perintah.');
   }
 }
 
 async function cmdSkip(message) {
   const queue = queues.get(message.guild.id);
-  if (!queue || !queue.songs.length) return message.reply('❌ Tidak ada lagu yang diputar!');
+  if (!queue || !queue.songs.length) return message.reply('❌ Tidak ada lagu!');
   queue.player.stop();
   message.reply('⏭️ Lagu di-skip!');
 }
 
 async function cmdStop(message) {
   const queue = queues.get(message.guild.id);
-  if (!queue) return message.reply('❌ Bot tidak sedang aktif!');
-  queue.songs = [];
-  queue.loop = false;
-  queue.player.stop();
+  if (!queue) return message.reply('❌ Bot tidak aktif!');
+  queue.songs = []; queue.loop = false; queue.player.stop();
   message.reply('⏹️ Music player dihentikan!');
 }
 
 async function cmdLeave(message) {
   const queue = queues.get(message.guild.id);
-  if (queue) {
-    queue.player.stop(true);
-    queue.connection?.destroy();
-    queues.delete(message.guild.id);
-  }
+  if (queue) { queue.player.stop(true); queue.connection?.destroy(); queues.delete(message.guild.id); }
   message.reply('👋 Bot keluar dari voice channel!');
 }
 
 async function cmdQueue(message) {
   const queue = queues.get(message.guild.id);
   if (!queue || !queue.songs.length) return message.reply('📋 Antrian kosong!');
-  const list = queue.songs.slice(0, 10)
-    .map((s, i) => `${i === 0 ? '▶️' : `${i + 1}.`} ${s.title} \`[${s.duration}]\``)
-    .join('\n');
-  const embed = new EmbedBuilder()
-    .setColor(0x5865F2)
-    .setTitle('📋 Antrian Lagu')
-    .setDescription(list)
-    .setFooter({ text: `Total: ${queue.songs.length} lagu${queue.loop ? ' | 🔁 Loop aktif' : ''}` });
+  const list = queue.songs.slice(0, 10).map((s, i) => `${i === 0 ? '▶️' : `${i + 1}.`} ${s.title} \`[${s.duration}]\``).join('\n');
+  const embed = new EmbedBuilder().setColor(0x5865F2).setTitle('📋 Antrian Lagu').setDescription(list).setFooter({ text: `Total: ${queue.songs.length} lagu${queue.loop ? ' | 🔁 Loop aktif' : ''}` });
   message.reply({ embeds: [embed] });
 }
 
 async function cmdNowPlaying(message) {
   const queue = queues.get(message.guild.id);
-  if (!queue || !queue.songs.length) return message.reply('❌ Tidak ada lagu yang diputar!');
+  if (!queue || !queue.songs.length) return message.reply('❌ Tidak ada lagu!');
   const song = queue.songs[0];
-  const embed = new EmbedBuilder()
-    .setColor(0x5865F2)
-    .setTitle('🎵 Now Playing')
-    .setDescription(`**[${song.title}](${song.url})**`)
-    .addFields(
-      { name: '⏱️ Durasi', value: song.duration || '?', inline: true },
-      { name: '👤 Request', value: song.requestedBy || 'Unknown', inline: true }
-    );
+  const embed = new EmbedBuilder().setColor(0x5865F2).setTitle('🎵 Now Playing').setDescription(`**[${song.title}](${song.url})**`).addFields({ name: '⏱️ Durasi', value: song.duration || '?', inline: true }, { name: '👤 Request', value: song.requestedBy || 'Unknown', inline: true });
   message.reply({ embeds: [embed] });
 }
 
 async function cmdPause(message) {
   const queue = queues.get(message.guild.id);
-  if (!queue) return message.reply('❌ Tidak ada lagu yang diputar!');
-  queue.player.pause();
-  message.reply('⏸️ Lagu di-pause!');
+  if (!queue) return message.reply('❌ Tidak ada lagu!');
+  queue.player.pause(); message.reply('⏸️ Lagu di-pause!');
 }
 
 async function cmdResume(message) {
   const queue = queues.get(message.guild.id);
-  if (!queue) return message.reply('❌ Tidak ada lagu yang diputar!');
-  queue.player.unpause();
-  message.reply('▶️ Lagu dilanjutkan!');
+  if (!queue) return message.reply('❌ Tidak ada lagu!');
+  queue.player.unpause(); message.reply('▶️ Lagu dilanjutkan!');
 }
 
 async function cmdLoop(message) {
   const queue = queues.get(message.guild.id);
-  if (!queue) return message.reply('❌ Tidak ada lagu yang diputar!');
+  if (!queue) return message.reply('❌ Tidak ada lagu!');
   queue.loop = !queue.loop;
   message.reply(`🔁 Loop: **${queue.loop ? 'Aktif' : 'Nonaktif'}**`);
 }
 
 async function cmdHelp(message) {
-  const embed = new EmbedBuilder()
-    .setColor(0x5865F2)
-    .setTitle('🎵 Owo Music Bot — Daftar Perintah')
-    .addFields(
-      { name: '`!play <judul/link>`', value: 'Putar lagu dari YouTube/Spotify', inline: false },
-      { name: '`!skip` / `!s`', value: 'Skip lagu', inline: true },
-      { name: '`!stop`', value: 'Stop & clear antrian', inline: true },
-      { name: '`!pause` / `!resume`', value: 'Pause / Resume', inline: true },
-      { name: '`!queue` / `!q`', value: 'Lihat antrian', inline: true },
-      { name: '`!np`', value: 'Lagu sekarang', inline: true },
-      { name: '`!loop`', value: 'Toggle loop', inline: true },
-      { name: '`!leave` / `!dc`', value: 'Keluar voice', inline: true }
-    )
-    .setFooter({ text: 'Owo Music Bot 🎵' });
+  const embed = new EmbedBuilder().setColor(0x5865F2).setTitle('🎵 Owo Music Bot — Daftar Perintah').addFields(
+    { name: '`!play <judul/link>`', value: 'Putar lagu dari YouTube/Spotify', inline: false },
+    { name: '`!skip` / `!s`', value: 'Skip lagu', inline: true },
+    { name: '`!stop`', value: 'Stop & clear antrian', inline: true },
+    { name: '`!pause` / `!resume`', value: 'Pause / Resume', inline: true },
+    { name: '`!queue` / `!q`', value: 'Lihat antrian', inline: true },
+    { name: '`!np`', value: 'Lagu sekarang', inline: true },
+    { name: '`!loop`', value: 'Toggle loop', inline: true },
+    { name: '`!leave` / `!dc`', value: 'Keluar voice', inline: true }
+  ).setFooter({ text: 'Owo Music Bot 🎵' });
   message.reply({ embeds: [embed] });
 }
 
 // ====================== MESSAGE HANDLER ======================
 client.on('messageCreate', async (message) => {
-  if (message.author.bot) return;
-  if (!message.guild) return;
-  if (!message.content.startsWith(PREFIX)) return;
+  if (message.author.bot || !message.guild || !message.content.startsWith(PREFIX)) return;
   const args = message.content.slice(PREFIX.length).trim().split(/ +/);
   const command = args.shift().toLowerCase();
   const query = args.join(' ');
   console.log(`[CMD] ${message.author.tag}: ${PREFIX}${command} ${query}`);
   switch (command) {
-    case 'play':
-    case 'p':
-      await cmdPlay(message, query);
-      break;
-    case 'skip':
-    case 's':
-      await cmdSkip(message);
-      break;
-    case 'stop':
-      await cmdStop(message);
-      break;
-    case 'leave':
-    case 'dc':
-      await cmdLeave(message);
-      break;
-    case 'queue':
-    case 'q':
-      await cmdQueue(message);
-      break;
-    case 'np':
-    case 'nowplaying':
-      await cmdNowPlaying(message);
-      break;
-    case 'pause':
-      await cmdPause(message);
-      break;
-    case 'resume':
-      await cmdResume(message);
-      break;
-    case 'loop':
-      await cmdLoop(message);
-      break;
-    case 'help':
-      await cmdHelp(message);
-      break;
+    case 'play': case 'p': await cmdPlay(message, query); break;
+    case 'skip': case 's': await cmdSkip(message); break;
+    case 'stop': await cmdStop(message); break;
+    case 'leave': case 'dc': await cmdLeave(message); break;
+    case 'queue': case 'q': await cmdQueue(message); break;
+    case 'np': case 'nowplaying': await cmdNowPlaying(message); break;
+    case 'pause': await cmdPause(message); break;
+    case 'resume': await cmdResume(message); break;
+    case 'loop': await cmdLoop(message); break;
+    case 'help': await cmdHelp(message); break;
   }
 });
 
