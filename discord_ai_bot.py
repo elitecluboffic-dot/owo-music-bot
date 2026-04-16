@@ -1,7 +1,6 @@
 import discord
 from discord.ext import commands
-from google import genai
-from google.genai import types
+from groq import Groq
 import os
 import asyncio
 from datetime import datetime
@@ -10,7 +9,7 @@ from datetime import datetime
 #  KONFIGURASI
 # ============================================================
 DISCORD_TOKEN = os.environ.get("DISCORD_TOKEN")
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 
 AI_NAME = "Jarvis"
 AI_PERSONALITY = """Kamu adalah Jarvis, asisten AI yang cerdas, ramah, dan sedikit humoris.
@@ -18,15 +17,15 @@ Kamu menjawab dalam bahasa yang sama dengan pengguna (Indonesia atau Inggris).
 Jawaban kamu singkat, padat, dan mudah dipahami. Gunakan emoji secukupnya."""
 
 PREFIX = "!"
-MAX_HISTORY = 10
+MAX_HISTORY = 6
 MAX_RETRIES = 3
-COOLDOWN_RATE = 3       # max request per user
-COOLDOWN_PER = 60       # per detik (1 menit)
-MODEL_NAME = "gemini-2.0-flash"  # FIX: model tersedia & rate limit lebih longgar
+COOLDOWN_RATE = 3
+COOLDOWN_PER = 60
+MODEL_NAME = "llama-3.3-70b-versatile"
 # ============================================================
 
-# Setup Gemini (SDK baru)
-client = genai.Client(api_key=GEMINI_API_KEY)
+# Setup Groq
+client = Groq(api_key=GROQ_API_KEY)
 
 # Setup Discord
 intents = discord.Intents.default()
@@ -48,45 +47,36 @@ class RateLimitError(Exception):
 
 
 # ============================================================
-#  HELPER: Konversi history ke format google-genai
+#  HELPER: Kirim ke Groq dengan retry otomatis
 # ============================================================
-def build_contents(history: list) -> list:
-    contents = []
-    for msg in history:
-        role = "user" if msg["role"] == "user" else "model"
-        contents.append(
-            types.Content(
-                role=role,
-                parts=[types.Part(text=msg["parts"][0])]
-            )
-        )
-    return contents
-
-
-# ============================================================
-#  HELPER: Kirim ke Gemini dengan retry otomatis
-# ============================================================
-async def ask_gemini(history: list, pertanyaan: str) -> str:
+async def ask_groq(history: list, pertanyaan: str) -> str:
     for attempt in range(MAX_RETRIES):
         try:
-            contents = build_contents(history)
+            # Bangun messages dengan system prompt
+            messages = [{"role": "system", "content": AI_PERSONALITY}]
+
+            # Tambah history
+            for msg in history:
+                messages.append({
+                    "role": msg["role"],
+                    "content": msg["content"]
+                })
 
             response = await asyncio.to_thread(
-                client.models.generate_content,
+                client.chat.completions.create,
                 model=MODEL_NAME,
-                contents=contents,
-                config=types.GenerateContentConfig(
-                    system_instruction=AI_PERSONALITY,
-                    max_output_tokens=2048,
-                )
+                messages=messages,
+                max_tokens=1024,
+                temperature=0.7,
             )
-            return response.text
+            return response.choices[0].message.content
 
         except Exception as e:
             err_str = str(e)
-            if "429" in err_str:
+            print(f"[ERROR] Attempt {attempt + 1}: {err_str}")
+            if "429" in err_str or "rate_limit" in err_str.lower():
                 if attempt < MAX_RETRIES - 1:
-                    wait = 15 * (attempt + 1)  # FIX: 15s, 30s lalu baru raise
+                    wait = 15 * (attempt + 1)
                     await asyncio.sleep(wait)
                     continue
                 else:
@@ -146,22 +136,22 @@ async def ai_command(ctx, *, pertanyaan: str):
             # Tambah pesan user ke history
             conversation_history[user_id].append({
                 "role": "user",
-                "parts": [pertanyaan]
+                "content": pertanyaan
             })
 
             # Ambil history terbatas
             history = conversation_history[user_id][-MAX_HISTORY:]
 
-            # Kirim ke Gemini
-            jawaban = await ask_gemini(history, pertanyaan)
+            # Kirim ke Groq
+            jawaban = await ask_groq(history, pertanyaan)
 
             # Simpan jawaban ke history
             conversation_history[user_id].append({
-                "role": "model",
-                "parts": [jawaban]
+                "role": "assistant",
+                "content": jawaban
             })
 
-            # Trim history agar tidak membengkak
+            # Trim history
             if len(conversation_history[user_id]) > MAX_HISTORY * 2:
                 conversation_history[user_id] = conversation_history[user_id][-MAX_HISTORY:]
 
@@ -192,10 +182,9 @@ async def ai_command(ctx, *, pertanyaan: str):
                 await ctx.reply(embed=embed)
 
         except RateLimitError:
-            # FIX: retry sudah dilakukan di dalam ask_gemini, jika sampai sini berarti benar-benar habis
             await ctx.reply(
-                "❌ **Quota API Gemini habis!**\n"
-                "Limit harian sudah tercapai. Coba lagi besok atau ganti API key 🙏"
+                "❌ **Rate limit Groq tercapai!**\n"
+                "Coba lagi dalam beberapa menit 🙏"
             )
 
         except Exception as e:
@@ -237,7 +226,7 @@ async def help_command(ctx):
     ]
     for name, value in commands_list:
         embed.add_field(name=name, value=value, inline=False)
-    embed.set_footer(text=f"Powered by Gemini AI • {bot.user}")
+    embed.set_footer(text=f"Powered by Groq AI • {bot.user}")
     await ctx.reply(embed=embed)
 
 
@@ -272,13 +261,13 @@ async def info(ctx):
         timestamp=datetime.now()
     )
     embed.add_field(name="🤖 Nama", value=AI_NAME, inline=True)
-    embed.add_field(name="🧠 Model AI", value="Gemini 2.0 Flash Lite (Google)", inline=True)  # FIX: updated model name
+    embed.add_field(name="🧠 Model AI", value="Llama 3.3 70B (Groq)", inline=True)
     embed.add_field(name="📡 Server", value=f"{len(bot.guilds)}", inline=True)
     embed.add_field(name="👥 Users", value=f"{len(bot.users)}", inline=True)
     embed.add_field(name="🔧 Prefix", value=f"`{PREFIX}`", inline=True)
     embed.add_field(name="📜 Commands", value=f"`{PREFIX}help`", inline=True)
     embed.set_thumbnail(url=bot.user.display_avatar.url)
-    embed.set_footer(text="Powered by Gemini AI")
+    embed.set_footer(text="Powered by Groq AI")
     await ctx.reply(embed=embed)
 
 
