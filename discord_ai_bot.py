@@ -1,6 +1,7 @@
 import discord
 from discord.ext import commands
-import google.generativeai as genai
+from google import genai
+from google.genai import types
 import os
 import asyncio
 from datetime import datetime
@@ -21,14 +22,11 @@ MAX_HISTORY = 10
 MAX_RETRIES = 3
 COOLDOWN_RATE = 3       # max request per user
 COOLDOWN_PER = 60       # per detik (1 menit)
+MODEL_NAME = "gemini-1.5-flash-8b"
 # ============================================================
 
-# Setup Gemini
-genai.configure(api_key=GEMINI_API_KEY)
-model = genai.GenerativeModel(
-    model_name="gemini-1.5-flash-8b",  # Limit free tier lebih besar
-    system_instruction=AI_PERSONALITY
-)
+# Setup Gemini (SDK baru)
+client = genai.Client(api_key=GEMINI_API_KEY)
 
 # Setup Discord
 intents = discord.Intents.default()
@@ -42,28 +40,57 @@ conversation_history: dict[int, list] = {}
 
 
 # ============================================================
+#  CUSTOM EXCEPTION
+# ============================================================
+class RateLimitError(Exception):
+    def __init__(self, retry_after):
+        self.retry_after = retry_after
+
+
+# ============================================================
+#  HELPER: Konversi history ke format google-genai
+# ============================================================
+def build_contents(history: list) -> list:
+    contents = []
+    for msg in history:
+        role = "user" if msg["role"] == "user" else "model"
+        contents.append(
+            types.Content(
+                role=role,
+                parts=[types.Part(text=msg["parts"][0])]
+            )
+        )
+    return contents
+
+
+# ============================================================
 #  HELPER: Kirim ke Gemini dengan retry otomatis
 # ============================================================
 async def ask_gemini(history: list, pertanyaan: str) -> str:
     for attempt in range(MAX_RETRIES):
         try:
-            chat = model.start_chat(history=history[:-1])
-            response = await asyncio.to_thread(chat.send_message, pertanyaan)
+            contents = build_contents(history)
+
+            response = await asyncio.to_thread(
+                client.models.generate_content,
+                model=MODEL_NAME,
+                contents=contents,
+                config=types.GenerateContentConfig(
+                    system_instruction=AI_PERSONALITY,
+                    max_output_tokens=2048,
+                )
+            )
             return response.text
+
         except Exception as e:
             err_str = str(e)
             if "429" in err_str:
                 if attempt < MAX_RETRIES - 1:
-                    wait_time = 60 * (attempt + 1)
-                    raise RateLimitError(wait_time)
+                    raise RateLimitError(60 * (attempt + 1))
                 else:
-                    raise RateLimitError(None)  # Semua retry gagal
+                    raise RateLimitError(None)
             else:
                 raise e
-
-class RateLimitError(Exception):
-    def __init__(self, retry_after):
-        self.retry_after = retry_after
 
 
 # ============================================================
@@ -120,7 +147,7 @@ async def ai_command(ctx, *, pertanyaan: str):
                 "parts": [pertanyaan]
             })
 
-            # Ambil history terbaru
+            # Ambil history terbatas
             history = conversation_history[user_id][-MAX_HISTORY:]
 
             # Kirim ke Gemini
@@ -169,7 +196,6 @@ async def ai_command(ctx, *, pertanyaan: str):
                     f"Otomatis retry dalam **{e.retry_after} detik**... Tunggu sebentar!"
                 )
                 await asyncio.sleep(e.retry_after)
-                # Coba sekali lagi setelah tunggu
                 try:
                     history = conversation_history.get(user_id, [])[-MAX_HISTORY:]
                     jawaban = await ask_gemini(history, pertanyaan)
