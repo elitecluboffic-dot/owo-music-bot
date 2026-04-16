@@ -1,2 +1,8 @@
-[variables]
-YOUTUBE_DL_SKIP_PYTHON_CHECK = "1"
+[phases.setup]
+nixPkgs = ["nodejs_22", "python3", "gcc", "gnumake", "pkg-config", "libopus"]
+
+[phases.install]
+cmds = ["npm i"]
+
+[start]
+cmd = "node index.js"
