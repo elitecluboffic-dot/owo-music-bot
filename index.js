@@ -17,18 +17,15 @@ const fs = require('fs');
 const path = require('path');
 
 // ====================== YT-DLP BINARY ======================
-// Otomatis deteksi OS: Windows pakai yt-dlp.exe, Linux/Railway pakai yt-dlp
 const YTDLP_BIN = (() => {
   const winPath = path.resolve('./yt-dlp.exe');
   const linuxPath = path.resolve('./yt-dlp');
   if (process.platform === 'win32' && fs.existsSync(winPath)) return winPath;
   if (fs.existsSync(linuxPath)) return linuxPath;
-  // Fallback ke PATH system
   return process.platform === 'win32' ? 'yt-dlp.exe' : 'yt-dlp';
 })();
 console.log(`[yt-dlp] Binary: ${YTDLP_BIN}`);
 
-// Pastikan yt-dlp executable di Linux
 if (process.platform !== 'win32' && fs.existsSync(YTDLP_BIN)) {
   try { fs.chmodSync(YTDLP_BIN, '755'); } catch (_) {}
 }
@@ -47,21 +44,22 @@ function formatDuration(seconds) {
   return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
 }
 function extractCleanUrl(input) {
-  if (typeof input !== 'string') input = String(input);
-  const match = input.match(/(?:youtu\.be\/|youtube\.com\/(?:watch\?v=|shorts\/))([a-zA-Z0-9_-]{11})/);
-  return match ? `https://www.youtube.com/watch?v=${match[1]}` : input.trim();
+  try {
+    const str = (input && typeof input === 'object') ? (input.href || JSON.stringify(input)) : String(input);
+    const match = str.match(/(?:youtu\.be\/|youtube\.com\/(?:watch\?v=|shorts\/))([a-zA-Z0-9_-]{11})/);
+    return match ? `https://www.youtube.com/watch?v=${match[1]}` : str.trim();
+  } catch (_) {
+    return String(input).trim();
+  }
 }
 
 // ====================== YOUTUBE COOKIES ======================
 let cookiesFilePath = null;
 
 function loadYouTubeCookies() {
-  // Prioritas 1: Cookie File path dari env
   if (process.env.YOUTUBE_COOKIE_FILE && fs.existsSync(process.env.YOUTUBE_COOKIE_FILE)) {
     cookiesFilePath = process.env.YOUTUBE_COOKIE_FILE;
     console.log(`🔄 Menggunakan cookies file: ${cookiesFilePath}`);
-
-    // Set ke play-dl juga
     try {
       const cookieContent = fs.readFileSync(cookiesFilePath, 'utf-8');
       const parsed = parseNetscapeCookies(cookieContent);
@@ -70,7 +68,6 @@ function loadYouTubeCookies() {
     return;
   }
 
-  // Prioritas 2: Cookie string dari env
   let cookieInput = process.env.YOUTUBE_COOKIE?.trim();
   if (!cookieInput) {
     console.log('⚠️ YOUTUBE_COOKIE dan YOUTUBE_COOKIE_FILE belum diisi');
@@ -78,7 +75,6 @@ function loadYouTubeCookies() {
     return;
   }
 
-  // Jika format Netscape, simpan ke file dulu supaya yt-dlp bisa pakai
   if (cookieInput.includes('.youtube.com') || cookieInput.includes('Netscape')) {
     const tmpPath = path.resolve('./cookies.txt');
     try {
@@ -86,7 +82,6 @@ function loadYouTubeCookies() {
       cookiesFilePath = tmpPath;
       console.log(`✅ Cookie Netscape disimpan ke ${tmpPath}`);
     } catch (_) {}
-
     const parsed = parseNetscapeCookies(cookieInput);
     if (parsed) {
       try { playdl.setToken({ youtube: { cookie: parsed } }); } catch (_) {}
@@ -94,7 +89,6 @@ function loadYouTubeCookies() {
     return;
   }
 
-  // Cookie string biasa
   try {
     playdl.setToken({ youtube: { cookie: cookieInput } });
     console.log(`✅ YouTube cookies dimuat (${cookieInput.length} char)`);
@@ -124,6 +118,28 @@ function parseNetscapeCookies(content) {
 }
 
 loadYouTubeCookies();
+
+// ====================== PO TOKEN + VISITOR DATA ======================
+if (process.env.YT_VISITOR_DATA || process.env.YT_PO_TOKEN) {
+  try {
+    const tokenObj = { youtube: {} };
+    if (process.env.YOUTUBE_COOKIE) tokenObj.youtube.cookie = process.env.YOUTUBE_COOKIE;
+    if (process.env.YT_VISITOR_DATA) tokenObj.youtube.visitorData = process.env.YT_VISITOR_DATA;
+    if (process.env.YT_PO_TOKEN) tokenObj.youtube.poToken = process.env.YT_PO_TOKEN;
+    playdl.setToken(tokenObj);
+    console.log(`✅ YouTube token dimuat (visitorData: ${!!process.env.YT_VISITOR_DATA}, poToken: ${!!process.env.YT_PO_TOKEN})`);
+  } catch (e) {
+    console.warn('⚠️ Gagal set YT token:', e.message);
+  }
+}
+
+// Debug cookies
+if (cookiesFilePath && fs.existsSync(cookiesFilePath)) {
+  const size = fs.statSync(cookiesFilePath).size;
+  console.log(`✅ Cookies file OK: ${cookiesFilePath} (${size} bytes)`);
+} else {
+  console.warn('⚠️ Cookies file TIDAK ditemukan! YouTube mungkin diblokir.');
+}
 
 // ====================== YTDL AGENT ======================
 let ytdlAgent;
@@ -225,7 +241,6 @@ client.once('clientReady', onReady);
 // ====================== RESOLVE SONGS ======================
 async function resolveSongs(query, requester, retry = 0) {
   const maxRetries = 4;
-  // Pastikan query selalu string
   if (typeof query !== 'string') query = String(query);
   const cacheKey = query.toLowerCase().trim();
   const cached = getCached(cacheKey);
@@ -266,7 +281,7 @@ async function resolveSongs(query, requester, retry = 0) {
       // ===== YOUTUBE URL =====
       if (query.includes('youtube.com') || query.includes('youtu.be')) {
         await jitter(1500, 3000);
-        const cleanUrl = extractCleanUrl(query); // FIX: selalu string bersih
+        const cleanUrl = extractCleanUrl(query);
 
         // Prioritas 1: yt-dlp
         try {
@@ -276,11 +291,18 @@ async function resolveSongs(query, requester, retry = 0) {
             noWarnings: true,
             quiet: true,
             noCheckCertificates: true,
-            'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            extractorRetries: 3,
+            'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+            addHeader: ['Accept-Language:en-US,en;q=0.9'],
           };
-          if (cookiesFilePath) ytdlpOptions.cookies = cookiesFilePath;
+          if (cookiesFilePath && fs.existsSync(cookiesFilePath)) {
+            ytdlpOptions.cookies = cookiesFilePath;
+          }
+          if (process.env.YT_PO_TOKEN && process.env.YT_VISITOR_DATA) {
+            ytdlpOptions.extractorArgs = `youtube:po_token=web+${process.env.YT_PO_TOKEN};visitor_data=${process.env.YT_VISITOR_DATA}`;
+          }
 
-          const ytInfo = await youtubedl(cleanUrl, ytdlpOptions); // FIX: pakai cleanUrl bukan query mentah
+          const ytInfo = await youtubedl(cleanUrl, ytdlpOptions);
           if (!ytInfo || !ytInfo.title) throw new Error('yt-dlp tidak mengembalikan data valid');
 
           const songs = [{ title: ytInfo.title, url: ytInfo.webpage_url || cleanUrl, duration: formatDuration(ytInfo.duration), requestedBy: requester, thumbnail: ytInfo.thumbnail }];
@@ -350,11 +372,23 @@ async function getStream(url, retry = 0) {
       '--quiet',
       '--no-warnings',
       '--no-check-certificates',
-      '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+      '--extractor-retries', '3',
+      '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+      '--add-header', 'Accept-Language:en-US,en;q=0.9',
     ];
-    if (cookiesFilePath) {
+
+    if (cookiesFilePath && fs.existsSync(cookiesFilePath)) {
       args.push('--cookies', cookiesFilePath);
       console.log(`[yt-dlp] Pakai cookies: ${cookiesFilePath}`);
+    } else {
+      console.warn('[yt-dlp] ⚠️ Tidak ada cookies file!');
+    }
+
+    if (process.env.YT_PO_TOKEN && process.env.YT_VISITOR_DATA) {
+      args.push('--extractor-args', `youtube:po_token=web+${process.env.YT_PO_TOKEN};visitor_data=${process.env.YT_VISITOR_DATA}`);
+      console.log('[yt-dlp] Pakai po_token + visitorData');
+    } else if (process.env.YT_VISITOR_DATA) {
+      args.push('--add-header', `X-Youtube-Identity-Token:${process.env.YT_VISITOR_DATA}`);
     }
 
     const subprocess = spawn(YTDLP_BIN, args, { stdio: ['ignore', 'pipe', 'pipe'] });
